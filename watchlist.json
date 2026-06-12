@@ -1,0 +1,6 @@
+[
+  { "ticker": "AAPL", "cik": "0000320193" },
+  { "ticker": "MSFT", "cik": "0000789019" },
+  { "ticker": "NVDA", "cik": "0001045810" },
+  { "ticker": "AMZN", "cik": "0001018724" }
+]
