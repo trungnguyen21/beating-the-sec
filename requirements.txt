@@ -1,0 +1,9 @@
+httpx 
+redis 
+feedparser 
+beautifulsoup4
+pymupdf 
+pydantic 
+python-dotenv 
+asyncio 
+aiohttp
