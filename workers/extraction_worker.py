@@ -1,8 +1,8 @@
 # workers/extraction_worker.py
-
+from workers.client import AIClient
 
 EXTRACTION_PROMPT = """You are a financial data extraction engine.
-Extract the following from this earnings press release. 
+Extract the following from this earnings press release.
 Return ONLY valid JSON, no other text.
 
 {
@@ -24,7 +24,5 @@ Return ONLY valid JSON, no other text.
 Press release:
 """
 
-from workers.client import invoke
-
-async def run_extraction(text: str) -> dict:
-    return await invoke(EXTRACTION_PROMPT, text)
+async def run_extraction(text: str, client: AIClient) -> dict:
+    return await client.invoke(EXTRACTION_PROMPT, text)

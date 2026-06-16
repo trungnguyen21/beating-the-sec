@@ -17,8 +17,9 @@ async def monitor_ir_page(company: dict, client: httpx.AsyncClient, queue, seen:
             r = await client.get(url, timeout=10)
             soup = BeautifulSoup(r.text, "html.parser")
             
-            # Grab the first/latest press release link — adapt selector per company
-            latest = soup.select_one(".press-release-item a, .news-list a")
+            # Use the company-specific selector from watchlist, or fallback to a default
+            selector = company.get("ir_selector", ".press-release-item a, .news-list a")
+            latest = soup.select_one(selector)
             if latest:
                 link_hash = hashlib.sha256(latest["href"].encode()).hexdigest()
                 if link_hash not in seen:

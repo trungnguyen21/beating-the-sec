@@ -1,30 +1,33 @@
 import json
+import os
+from typing import Protocol, runtime_checkable
+from google import genai
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# TODO: Initialize your AI client here. For example:
-# from anthropic import AsyncAnthropic
-# client = AsyncAnthropic()
-client = None
 
-async def invoke(prompt: str, text: str, max_tokens: int = 1000) -> dict:
-    """
-    Unified method to call the AI model and return parsed JSON.
-    """
-    if client is None:
-        logger.warning("AI client is not initialized. Using a mock response.")
-        return {}
+@runtime_checkable
+class AIClient(Protocol):
+    async def invoke(self, prompt: str, text: str, max_tokens: int = 1000) -> dict: ...
 
-    try:
-        # If using `AsyncAnthropic`, this should be `await client.messages.create(...)`
-        # If using a synchronous client, it will block the event loop.
-        response = client.messages.create(
-            model="claude-sonnet-4-6",
-            max_tokens=max_tokens,
-            messages=[{"role": "user", "content": prompt + text[:8000]}]
-        )
-        return json.loads(response.content[0].text)
-    except Exception as e:
-        logger.error(f"AI extraction failed: {e}")
-        return {}
+
+class GeminiClient:
+    def __init__(self, api_key: str | None = None, model: str = "gemini-2.5-flash"):
+        self._client = genai.Client(api_key=api_key or os.environ.get("GEMINI_API_KEY"))
+        self._model = model
+
+    async def invoke(self, prompt: str, text: str, max_tokens: int = 1000) -> dict:
+        try:
+            response = await self._client.aio.models.generate_content(
+                model=self._model,
+                contents=prompt + text[:8000],
+                config=genai.types.GenerateContentConfig(
+                    max_output_tokens=max_tokens,
+                    response_mime_type="application/json",
+                ),
+            )
+            return json.loads(response.text)
+        except Exception as e:
+            logger.error(f"Gemini invocation failed: {e}")
+            return {}

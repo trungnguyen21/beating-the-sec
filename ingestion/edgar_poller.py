@@ -10,16 +10,14 @@ import json
 from datetime import datetime, timezone
 
 from utils.logger import get_logger
+from config import HEADERS
 
 logger = get_logger(__name__)
 
 EDGAR_BASE = "https://www.sec.gov/Archives/edgar/data"
 SUBMISSIONS_API = "https://data.sec.gov/submissions/CIK{cik}.json"
 
-HEADERS = {
-    "User-Agent": "BSEC example@email.com",  # REQUIRED by SEC
-    "Accept-Encoding": "gzip, deflate",
-}
+HEADERS['Accept-Encoding'] = "gzip, deflate"
 
 async def get_last_accession(cik: str, client: httpx.AsyncClient) -> str:
     """Fetch the company's most recent accession number from SEC submissions API."""

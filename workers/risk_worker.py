@@ -1,5 +1,5 @@
 # workers/risk_worker.py
-import json
+from workers.client import AIClient
 
 RISK_PROMPT = """You are a risk analysis AI for institutional investors.
 Scan this earnings press release for material risk signals.
@@ -9,7 +9,7 @@ Return ONLY valid JSON, no other text.
   "risk_level": <"low" | "medium" | "high" | "critical">,
   "flags": [
     {
-      "type": <"guidance_cut" | "layoffs" | "restatement" | "legal" | 
+      "type": <"guidance_cut" | "layoffs" | "restatement" | "legal" |
                 "macro_headwind" | "customer_concentration" | "debt" | "other">,
       "description": <string, one sentence>,
       "severity": <"low" | "medium" | "high">
@@ -24,7 +24,5 @@ Return ONLY valid JSON, no other text.
 Press release:
 """
 
-from workers.client import invoke
-
-async def run_risk(text: str) -> dict:
-    return await invoke(RISK_PROMPT, text)
+async def run_risk(text: str, client: AIClient) -> dict:
+    return await client.invoke(RISK_PROMPT, text)

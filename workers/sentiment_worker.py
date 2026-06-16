@@ -1,5 +1,5 @@
 # workers/sentiment_worker.py
-import json
+from workers.client import AIClient
 
 SENTIMENT_PROMPT = """You are a financial analyst AI.
 Analyze the tone and language of this earnings press release.
@@ -18,7 +18,5 @@ Return ONLY valid JSON, no other text.
 Press release:
 """
 
-from workers.client import invoke
-
-async def run_sentiment(text: str) -> dict:
-    return await invoke(SENTIMENT_PROMPT, text)
+async def run_sentiment(text: str, client: AIClient) -> dict:
+    return await client.invoke(SENTIMENT_PROMPT, text)
