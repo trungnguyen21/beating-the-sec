@@ -1,5 +1,6 @@
 # main.py
 import asyncio
+import os
 from ingestion.watcher import run_watcher
 from ingestion.deduplicator import Deduplicator
 from pipeline.queue import FilingQueue
@@ -7,6 +8,7 @@ from pipeline.normalizer import normalize, split_sections
 from pipeline.dispatcher import analyze_filing
 from aggregator.aggregator import build_alert
 from workers.client import AIClient, GeminiClient
+from delivery.webhook import DiscordWebhook
 
 
 async def process_filings(queue: FilingQueue, deduplicator: Deduplicator, ai_client: AIClient):
@@ -29,7 +31,7 @@ async def process_filings(queue: FilingQueue, deduplicator: Deduplicator, ai_cli
 
             sections = split_sections(clean_text)
 
-            results = await analyze_filing(sections, ai_client)
+            results = await analyze_filing(sections, ai_client, filing.get("estimates"))
 
             alert = build_alert(
                 ticker=filing["ticker"],
@@ -38,6 +40,11 @@ async def process_filings(queue: FilingQueue, deduplicator: Deduplicator, ai_cli
             )
 
             print(f"🚨 Alert: {alert['signal_label']} — {alert['ticker']}")
+
+            discord_url = os.environ.get("DISCORD_WEBHOOK_URL")
+            if discord_url:
+                await DiscordWebhook(discord_url).send(alert)
+
             await queue.ack(msg_id)
 
         except Exception as e:

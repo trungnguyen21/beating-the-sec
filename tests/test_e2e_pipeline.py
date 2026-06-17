@@ -26,6 +26,8 @@ from pipeline.normalizer import normalize, split_sections
 from pipeline.dispatcher import analyze_filing
 from aggregator.aggregator import build_alert
 from workers.client import GeminiClient
+from ingestion.estimates import fetch_estimates
+from delivery.webhook import DiscordWebhook
 
 # ---------------------------------------------------------------------------
 # Bundled HTML sample (NVDA Q3 2025 earnings excerpt)
@@ -106,18 +108,23 @@ async def run() -> None:
     # ------------------------------------------------------------------
     # STEP 3: Spawn 3 agents concurrently
     # ------------------------------------------------------------------
-    _section("STEP 3 — Spawn 3 AI Agents (concurrent)")
+    _section("STEP 3 — Fetch Analyst Estimates")
+    ticker = "NVDA" if not html_path else os.path.basename(html_path).split(".")[0].upper()
+    estimates = await fetch_estimates(ticker)
+    print(f"Estimates for {ticker}: {estimates}")
+
+    _section("STEP 4 — Spawn 3 AI Agents (concurrent)")
     print("Launching: extraction_worker | sentiment_worker | risk_worker")
     async with GeminiClient() as client:
         t0 = time.perf_counter()
-        results = await analyze_filing(sections, client)
+        results = await analyze_filing(sections, client, estimates)
         elapsed = time.perf_counter() - t0
     print(f"All 3 agents finished in {elapsed:.2f}s")
 
     # ------------------------------------------------------------------
     # STEP 4: Display individual agent results
     # ------------------------------------------------------------------
-    _section("STEP 4 — Agent Results")
+    _section("STEP 5 — Agent Results")
 
     print("\n[extraction_worker]")
     extraction = results.get("extraction", {})
@@ -137,8 +144,7 @@ async def run() -> None:
     # ------------------------------------------------------------------
     # STEP 5: Aggregate into alert
     # ------------------------------------------------------------------
-    _section("STEP 5 — Aggregate Alert")
-    ticker = "NVDA" if not html_path else os.path.basename(html_path).split(".")[0].upper()
+    _section("STEP 6 — Aggregate Alert")
     alert = build_alert(
         ticker=ticker,
         results=results,
@@ -149,7 +155,7 @@ async def run() -> None:
     # ------------------------------------------------------------------
     # STEP 6: Sanity assertions
     # ------------------------------------------------------------------
-    _section("STEP 6 — Sanity Checks")
+    _section("STEP 7 — Sanity Checks")
 
     checks = [
         ("alert has ticker",           alert.get("ticker") == ticker),
@@ -173,6 +179,10 @@ async def run() -> None:
     else:
         print("One or more checks failed — see above.")
         sys.exit(1)
+
+    print("STEP 8 - Delivery")
+    delivery = DiscordWebhook(os.environ["DISCORD_WEBHOOK_URL"])
+    await delivery.send(alert=alert)
 
 
 if __name__ == "__main__":

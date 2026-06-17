@@ -24,5 +24,19 @@ Return ONLY valid JSON, no other text.
 Press release:
 """
 
-async def run_extraction(text: str, client: AIClient) -> dict:
-    return await client.invoke(EXTRACTION_PROMPT, text)
+def build_extraction_prompt(estimates: dict | None) -> str:
+    if not estimates:
+        return EXTRACTION_PROMPT
+    parts = []
+    if estimates.get("eps_estimate") is not None:
+        parts.append(f"EPS estimate: ${estimates['eps_estimate']}")
+    if estimates.get("revenue_estimate_millions") is not None:
+        parts.append(f"Revenue estimate: ${estimates['revenue_estimate_millions']}M")
+    if not parts:
+        return EXTRACTION_PROMPT
+    context = "Analyst consensus estimates for this quarter: " + ", ".join(parts) + ".\n\n"
+    return context + EXTRACTION_PROMPT
+
+
+async def run_extraction(text: str, client: AIClient, estimates: dict | None = None) -> dict:
+    return await client.invoke(build_extraction_prompt(estimates), text)

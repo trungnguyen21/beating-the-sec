@@ -6,6 +6,7 @@ import httpx
 from utils.logger import get_logger
 from ingestion.edgar_poller import get_last_accession, next_accession, poll_for_filing, fetch_filing_document
 from ingestion.sec_rss import detect_via_rss
+from ingestion.estimates import fetch_estimates
 
 logger = get_logger(__name__)
 
@@ -58,12 +59,17 @@ async def watch_company(company: dict, client: httpx.AsyncClient, queue) -> None
     logger.info(f"🏁 {ticker} detected via {source}")
     result["ticker"] = ticker
 
-    raw_text = await fetch_filing_document(result["index_url"], client)
+    raw_text, estimates = await asyncio.gather(
+        fetch_filing_document(result["index_url"], client),
+        fetch_estimates(ticker),
+    )
+
     if not raw_text:
         logger.warning(f"No exhibit found for {ticker} — skipping")
         return
 
     result["raw_text"] = raw_text
+    result["estimates"] = estimates
     await queue.enqueue(result)
 
 
