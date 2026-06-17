@@ -6,7 +6,6 @@ https://github.com/john-friedman/The-fastest-way-to-get-SEC-filings
 
 import asyncio
 import httpx
-import json
 from datetime import datetime, timezone
 
 from utils.logger import get_logger
@@ -93,25 +92,3 @@ async def fetch_filing_document(index_url: str, client: httpx.AsyncClient) -> st
     
     return ""
 
-async def watch_company(company: dict, client: httpx.AsyncClient, queue):
-    """Watch a single company for new earnings filings."""
-    cik = company["cik"]
-    ticker = company["ticker"]
-    
-    print(f"👁  Watching {ticker} (CIK: {cik})")
-    
-    last_accession = await get_last_accession(cik, client)
-    predicted = next_accession(last_accession)
-    
-    result = await poll_for_filing(cik, predicted, client)
-    if result:
-        result["ticker"] = ticker
-        await queue.enqueue(result)  # Send to AI pipeline
-
-async def run_watcher(watchlist_path: str, queue):
-    with open(watchlist_path) as f:
-        watchlist = json.load(f)
-    
-    async with httpx.AsyncClient() as client:
-        tasks = [watch_company(company, client, queue) for company in watchlist]
-        await asyncio.gather(*tasks)

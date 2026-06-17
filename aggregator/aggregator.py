@@ -32,9 +32,10 @@ def compute_signal_score(results: dict) -> float:
     elif ext.get("guidance_direction") == "withdrawn":
         score -= 0.10
     
-    # Sentiment
-    tone_map = {"bullish": 0.10, "neutral": 0.0, "cautious": -0.05, "bearish": -0.15}
-    score += tone_map.get(sent.get("overall_tone", "neutral"), 0)
+    # Sentiment — scale tone contribution by confidence (0.0–1.0)
+    tone_map = {"bullish": 0.15, "neutral": 0.0, "cautious": -0.05, "bearish": -0.20}
+    confidence = float(sent.get("confidence_score", 0.5))
+    score += tone_map.get(sent.get("overall_tone", "neutral"), 0) * confidence
     
     # Risk
     if risk.get("guidance_cut_detected"):
@@ -46,7 +47,7 @@ def compute_signal_score(results: dict) -> float:
     
     return round(max(0.0, min(1.0, score)), 2)
 
-def build_alert(ticker: str, text: str, results: dict, detected_at: str) -> dict:
+def build_alert(ticker: str, results: dict, detected_at: str) -> dict:
     score = compute_signal_score(results)
     ext = results.get("extraction", {})
     sent = results.get("sentiment", {})
@@ -57,7 +58,7 @@ def build_alert(ticker: str, text: str, results: dict, detected_at: str) -> dict
         "detected_at": detected_at,
         "alerted_at": datetime.now(timezone.utc).isoformat(),
         "signal_score": score,
-        "signal_label": "🟢 Bullish" if score > 0.65 else "🔴 Bearish" if score < 0.40 else "🟡 Neutral",
+        "signal_label": "🟢 Bullish" if score >= 0.65 else "🔴 Bearish" if score < 0.40 else "🟡 Neutral",
         "headline": sent.get("headline_signal", ""),
         "eps": {
             "actual": ext.get("eps_actual"),

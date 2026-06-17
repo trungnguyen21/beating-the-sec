@@ -1,13 +1,12 @@
 # main.py
 import asyncio
-import json
-from ingestion.edgar_poller import run_watcher
+from ingestion.watcher import run_watcher
 from ingestion.deduplicator import Deduplicator
 from pipeline.queue import FilingQueue
 from pipeline.normalizer import normalize, split_sections
 from pipeline.dispatcher import analyze_filing
 from aggregator.aggregator import build_alert
-from workers.client import AIClient
+from workers.client import AIClient, GeminiClient
 
 
 async def process_filings(queue: FilingQueue, deduplicator: Deduplicator, ai_client: AIClient):
@@ -34,7 +33,6 @@ async def process_filings(queue: FilingQueue, deduplicator: Deduplicator, ai_cli
 
             alert = build_alert(
                 ticker=filing["ticker"],
-                text=clean_text,
                 results=results,
                 detected_at=filing["detected_at"],
             )
@@ -50,12 +48,12 @@ async def process_filings(queue: FilingQueue, deduplicator: Deduplicator, ai_cli
 async def main():
     queue = FilingQueue()
     deduplicator = Deduplicator()
-    ai_client = AIClient()
 
-    await asyncio.gather(
-        run_watcher("watchlist.json", queue),
-        process_filings(queue, deduplicator, ai_client),
-    )
+    async with GeminiClient() as ai_client:
+        await asyncio.gather(
+            run_watcher("watchlist.json", queue),
+            process_filings(queue, deduplicator, ai_client),
+        )
 
 
 if __name__ == "__main__":

@@ -1,13 +1,65 @@
 import asyncio
+import calendar
 import hashlib
 import httpx
 import feedparser
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from utils.logger import get_logger
 from config import HEADERS
 from ingestion.classifier import classify_items
 
 logger = get_logger(__name__)
+
+
+async def detect_via_rss(company: dict, client: httpx.AsyncClient) -> dict:
+    """
+    One-shot: poll the SEC RSS feed until a new actionable 8-K appears.
+    Returns filing metadata dict (same shape as poll_for_filing).
+    Designed to be raced against the edgar poller — caller cancels the loser.
+    """
+    ticker = company["ticker"]
+    rss_url = (
+        f"https://www.sec.gov/cgi-bin/browse-edgar"
+        f"?action=getcompany&CIK={company['cik']}&type=8-K&output=atom"
+    )
+    seen: set[str] = set()
+
+    while True:
+        try:
+            r = await client.get(rss_url, headers=HEADERS, timeout=10)
+            feed = feedparser.parse(r.text)
+
+            for entry in feed.entries[:3]:
+                items_desc = entry.get('items-desc', '')
+                pipelines = classify_items(items_desc)
+                if not pipelines:
+                    continue
+
+                if hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+                    timestamp = calendar.timegm(entry.updated_parsed)
+                    entry_date = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+                    if datetime.now(timezone.utc) - entry_date > timedelta(hours=24):
+                        continue
+
+                link_hash = hashlib.sha256(entry.link.encode()).hexdigest()
+                if link_hash in seen:
+                    continue
+                seen.add(link_hash)
+
+                logger.info(f"📡 RSS hit for {ticker}: {entry.title} — {pipelines}")
+                return {
+                    "ticker": ticker,
+                    "cik": company["cik"],
+                    "accession": entry.get('accession-number', ''),
+                    "index_url": entry.link,
+                    "pipelines": pipelines,
+                    "detected_at": datetime.now(timezone.utc).isoformat(),
+                    "source": "sec_rss",
+                }
+        except Exception as e:
+            logger.error(f"RSS detect error ({ticker}): {e}")
+
+        await asyncio.sleep(5)
 
 
 async def monitor_nasdaq_rss(company: dict, queue, seen: set):

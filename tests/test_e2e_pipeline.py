@@ -20,7 +20,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from dotenv import load_dotenv
 load_dotenv()
 
-from pipeline.normalizer import normalize
+from pprint import pprint
+
+from pipeline.normalizer import normalize, split_sections
 from pipeline.dispatcher import analyze_filing
 from aggregator.aggregator import build_alert
 from workers.client import GeminiClient
@@ -64,27 +66,27 @@ def _section(title: str) -> None:
     print(f"{'=' * width}")
 
 
-def _load_filing(pdf_path: str | None) -> tuple[bytes | str, str]:
+def _load_filing(html_path: str | None) -> tuple[str, str]:
     """Return (content, content_type) for the filing to test."""
-    if pdf_path:
-        with open(pdf_path, "rb") as f:
-            return f.read(), "pdf"
-    print("No PDF provided — using bundled HTML sample (NVDA Q3 FY2025 earnings).")
+    if html_path:
+        with open(html_path) as f:
+            return f.read(), "html"
+    print("No file provided — using bundled HTML sample (NVDA Q3 FY2025 earnings).")
     return SAMPLE_HTML, "html"
 
 
 async def run() -> None:
-    pdf_path = sys.argv[1] if len(sys.argv) > 1 else None
+    html_path = sys.argv[1] if len(sys.argv) > 1 else None
 
     # ------------------------------------------------------------------
     # STEP 1: Load filing
     # ------------------------------------------------------------------
     _section("STEP 1 — Load SEC Filing")
-    content, content_type = _load_filing(pdf_path)
-    source_label = pdf_path or "bundled HTML sample"
+    content, content_type = _load_filing(html_path)
+    source_label = html_path or "bundled HTML sample"
     print(f"Source      : {source_label}")
     print(f"Format      : {content_type.upper()}")
-    print(f"Raw size    : {len(content):,} {'bytes' if isinstance(content, bytes) else 'chars'}")
+    print(f"Raw size    : {len(content):,} chars")
 
     # ------------------------------------------------------------------
     # STEP 2: Parse / normalize
@@ -97,16 +99,19 @@ async def run() -> None:
     assert isinstance(clean_text, str) and len(clean_text) > 0, "Normalizer returned empty string"
     print(f"Clean text  : {len(clean_text):,} chars  ({elapsed * 1000:.1f} ms)")
     print(f"\nFirst 300 chars:\n{clean_text[:300]}")
+    sections = split_sections(clean_text)
+    print("Splitted into sections!")
+    pprint(sections)
 
     # ------------------------------------------------------------------
     # STEP 3: Spawn 3 agents concurrently
     # ------------------------------------------------------------------
     _section("STEP 3 — Spawn 3 AI Agents (concurrent)")
     print("Launching: extraction_worker | sentiment_worker | risk_worker")
-    client = GeminiClient()
-    t0 = time.perf_counter()
-    results = await analyze_filing(clean_text, client)
-    elapsed = time.perf_counter() - t0
+    async with GeminiClient() as client:
+        t0 = time.perf_counter()
+        results = await analyze_filing(sections, client)
+        elapsed = time.perf_counter() - t0
     print(f"All 3 agents finished in {elapsed:.2f}s")
 
     # ------------------------------------------------------------------
@@ -133,10 +138,9 @@ async def run() -> None:
     # STEP 5: Aggregate into alert
     # ------------------------------------------------------------------
     _section("STEP 5 — Aggregate Alert")
-    ticker = "NVDA" if not pdf_path else os.path.basename(pdf_path).split(".")[0].upper()
+    ticker = "NVDA" if not html_path else os.path.basename(html_path).split(".")[0].upper()
     alert = build_alert(
         ticker=ticker,
-        text=clean_text,
         results=results,
         detected_at="2024-11-20T21:00:00Z",
     )
