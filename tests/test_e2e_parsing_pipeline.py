@@ -29,37 +29,6 @@ from workers.client import GeminiClient
 from ingestion.estimates import fetch_estimates
 from delivery.webhook import DiscordWebhook
 
-# ---------------------------------------------------------------------------
-# Bundled HTML sample (NVDA Q3 2025 earnings excerpt)
-# ---------------------------------------------------------------------------
-SAMPLE_HTML = """
-<html><body>
-<h1>NVIDIA Announces Financial Results for Third Quarter Fiscal 2025</h1>
-<p>SANTA CLARA, Calif., Nov. 20, 2024 (GLOBE NEWSWIRE) --
-NVIDIA (NASDAQ: NVDA) today reported revenue for the third quarter ended October 27, 2024,
-of $35.08 billion, up 17% from the previous quarter and up 94% from a year ago.</p>
-
-<p>GAAP earnings per diluted share for the quarter were $0.78, up 16% from the previous
-quarter and up 111% from a year ago. Non-GAAP earnings per diluted share were $0.81,
-up 19% from the previous quarter and up 103% from a year ago.</p>
-
-<p>"The age of AI is in full steam, propelling a global shift to NVIDIA computing,"
-said Jensen Huang, founder and CEO of NVIDIA.</p>
-
-<p>For the fourth quarter of fiscal 2025, NVIDIA expects revenue to be $37.5 billion,
-plus or minus 2%. This is above the prior outlook of $32.5 billion, representing
-raised guidance on strong data center demand.</p>
-
-<p>Gross margin is expected to be 73.5% and 73.0% on a GAAP and non-GAAP basis,
-respectively, plus or minus 50 basis points.</p>
-
-<p>Data Center revenue was $30.8 billion, up 17% sequentially and up 112% year on year,
-driven by strong demand for NVIDIA Hopper GPU computing platform.</p>
-
-<footer>Copyright 2024 NVIDIA Corporation</footer>
-</body></html>
-"""
-
 
 def _section(title: str) -> None:
     width = 60
@@ -74,7 +43,7 @@ def _load_filing(html_path: str | None) -> tuple[str, str]:
         with open(html_path) as f:
             return f.read(), "html"
     print("No file provided — using bundled HTML sample (NVDA Q3 FY2025 earnings).")
-    return SAMPLE_HTML, "html"
+    return None, "html"
 
 
 async def run() -> None:

@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from utils.logger import get_logger
 from config import HEADERS
+from models.model_detectors import DetectorResult, DetectorSource
 
 logger = get_logger(__name__)
 
@@ -43,7 +44,7 @@ def build_index_url(company_cik: str, accession: str) -> str:
     return index_url
 
 async def poll_for_filing(company_cik: str, predicted_accession: str,
-                           client: httpx.AsyncClient, timeout: int = 3600) -> dict | None:
+                           client: httpx.AsyncClient, timeout: int = 60) -> DetectorSource | None:
     """
     Poll the predicted index URL every 1 seconds until it returns 200.
     Returns filing metadata dict when found.
@@ -57,12 +58,14 @@ async def poll_for_filing(company_cik: str, predicted_accession: str,
             if r.status_code == 200:
                 detected_at = datetime.now(timezone.utc).isoformat()
                 logger.info(f"✅ Filing detected: {predicted_accession} at {detected_at}")
-                return {
-                    "accession": predicted_accession,
-                    "company_cik": company_cik,
-                    "index_url": url,
-                    "detected_at": detected_at,
-                }
+                result = DetectorResult(
+                    accession=predicted_accession,
+                    company_cik=company_cik,
+                    index_url=url,
+                    detected_at=detected_at,
+                    source=DetectorSource.EDGAR_POLLER
+                )
+                return result
         except Exception as e:
             logger.error(f"Poll error: {e}")
         

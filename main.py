@@ -3,13 +3,15 @@ import asyncio
 import os
 from ingestion.watcher import run_watcher
 from ingestion.deduplicator import Deduplicator
-from pipeline.queue import FilingQueue
+from pipeline.queue import FilingQueue, InMemoryFilingQueue
 from pipeline.normalizer import normalize, split_sections
 from pipeline.dispatcher import analyze_filing
 from aggregator.aggregator import build_alert
 from workers.client import AIClient, GeminiClient
 from delivery.webhook import DiscordWebhook
 
+from dotenv import load_dotenv
+load_dotenv()
 
 async def process_filings(queue: FilingQueue, deduplicator: Deduplicator, ai_client: AIClient):
     """Consumer loop: read from queue, normalize, split sections, analyze, alert."""
@@ -53,7 +55,7 @@ async def process_filings(queue: FilingQueue, deduplicator: Deduplicator, ai_cli
 
 
 async def main():
-    queue = FilingQueue()
+    queue = InMemoryFilingQueue()
     deduplicator = Deduplicator()
 
     async with GeminiClient() as ai_client:

@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from utils.logger import get_logger
 from config import HEADERS
 from ingestion.classifier import classify_items
+from models.model_detectors import DetectorResult, DetectorSource
 
 logger = get_logger(__name__)
 
@@ -23,6 +24,7 @@ async def detect_via_rss(company: dict, client: httpx.AsyncClient) -> dict:
         f"?action=getcompany&CIK={company['cik']}&type=8-K&output=atom"
     )
     seen: set[str] = set()
+    logger.info(f"Watching the RSS feed at {rss_url}")
 
     while True:
         try:
@@ -47,17 +49,18 @@ async def detect_via_rss(company: dict, client: httpx.AsyncClient) -> dict:
                 seen.add(link_hash)
 
                 logger.info(f"📡 RSS hit for {ticker}: {entry.title} — {pipelines}")
-                return {
-                    "ticker": ticker,
-                    "cik": company["cik"],
-                    "accession": entry.get('accession-number', ''),
-                    "index_url": entry.link,
-                    "pipelines": pipelines,
-                    "detected_at": datetime.now(timezone.utc).isoformat(),
-                    "source": "sec_rss",
-                }
+                result = DetectorResult(
+                    ticker=company["ticker"],
+                    cik=company["cik"],
+                    accession=entry.get('accession-number', ''),
+                    index_url=entry.link,
+                    detected_at=datetime.now(timezone.utc).isoformat(),
+                    source=DetectorSource.RSS_POLLER,
+                )
+                return result
         except Exception as e:
             logger.error(f"RSS detect error ({ticker}): {e}")
+            return None
 
         await asyncio.sleep(5)
 

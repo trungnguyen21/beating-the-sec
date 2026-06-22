@@ -7,11 +7,12 @@ from utils.logger import get_logger
 from ingestion.edgar_poller import get_last_accession, next_accession, poll_for_filing, fetch_filing_document
 from ingestion.sec_rss import detect_via_rss
 from ingestion.estimates import fetch_estimates
+from models.model_detectors import DetectorResult
 
 logger = get_logger(__name__)
 
 
-async def _detect_filing(company: dict, client: httpx.AsyncClient) -> tuple[dict, str]:
+async def _detect_filing(company: dict, client: httpx.AsyncClient) -> tuple[DetectorResult, str]:
     """
     Race all available detectors for a single company.
     Returns (filing_metadata, source_name) from whichever wins.
