@@ -35,5 +35,8 @@ class DetectorResult:
     cik: str
     accession: Optional[str]
     index_url: str
-    detected_at: datetime.datetime
+    detected_at: str                               # UTC ISO-8601 string e.g. "2026-06-24T16:00:00+00:00"
     source: DetectorSource
+    filed_at: Optional[datetime.datetime] = None  # tz-aware UTC datetime; None means "just appeared"
+    raw_text: Optional[str] = None
+    estimates: Optional[dict] = None

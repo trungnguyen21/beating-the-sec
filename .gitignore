@@ -11,3 +11,5 @@ wheels/
 .env 
 data/
 draft.ipynb
+
+watchlist.json

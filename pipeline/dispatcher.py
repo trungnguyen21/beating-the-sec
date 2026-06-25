@@ -13,8 +13,13 @@ async def analyze_filing(sections: dict[str, str], client: AIClient,
     relevant to its task so the prompt stays focused and token-efficient.
     Total time = slowest worker, not sum.
     """
+    financials_and_guidance = (
+        (sections["financials"] + "\n\n" + sections["guidance"]).strip()
+        or sections["full"]
+    )
+
     extraction, sentiment, risk = await asyncio.gather(
-        run_extraction(sections["financials"] or sections["full"], client, estimates),
+        run_extraction(financials_and_guidance, client, estimates),
         run_sentiment(sections["header"] or sections["full"], client),
         run_risk(sections["full"], client),
         return_exceptions=True,

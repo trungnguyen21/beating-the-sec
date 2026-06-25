@@ -55,6 +55,7 @@ async def poll_for_filing(company_cik: str, predicted_accession: str,
     while asyncio.get_event_loop().time() < deadline:
         try:
             r = await client.head(url, headers=HEADERS, timeout=5)
+            logger.debug(f"Pinged {company_cik} predicted accession")
             if r.status_code == 200:
                 detected_at = datetime.now(timezone.utc).isoformat()
                 logger.info(f"✅ Filing detected: {predicted_accession} at {detected_at}")
@@ -87,7 +88,7 @@ async def fetch_filing_document(index_url: str, client: httpx.AsyncClient) -> st
         cells = row.find_all("td")
         if len(cells) >= 3:
             doc_type = cells[1].text.strip()
-            if doc_type in ("EX-99.1", "8-K"):  # Earnings press release
+            if "EX-99.1" in doc_type:
                 href = cells[2].find("a")["href"]
                 doc_url = f"https://www.sec.gov{href}"
                 doc_r = await client.get(doc_url, headers=HEADERS)
