@@ -1,0 +1,7 @@
+[
+    {
+        "name": "trung", 
+        "watchlist": ["NVDA", "MSFT", "MU"], 
+        "webhook": "https://test.com"
+    }
+]

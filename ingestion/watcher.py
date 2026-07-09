@@ -8,9 +8,7 @@ from ingestion.edgar_poller import get_last_accession, next_accession, poll_for_
 from ingestion.sec_rss import detect_via_rss
 from ingestion.estimates import fetch_estimates
 from models.model_detectors import DetectorResult
-
-MAX_FILING_AGE_HOURS = 2       # ignore filings older than this
-POST_FILING_COOLDOWN_HOURS = 4  # wait this long before watching for the next filing
+from config import MAX_FILING_AGE_HOURS, POST_FILING_COOLDOWN_HOURS
 
 logger = get_logger(__name__)
 
