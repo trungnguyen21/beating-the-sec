@@ -10,12 +10,10 @@ from pipeline.dispatcher import analyze_filing
 from aggregator.aggregator import build_alert
 from workers.client import AIClient, GeminiClient
 from delivery.webhook import DiscordWebhook
+from config import CONSUMER_CONCURRENCY
 
 from dotenv import load_dotenv
 load_dotenv()
-
-CONSUMER_CONCURRENCY = 4  # max filings processed simultaneously (each uses 3 AI calls)
-
 
 async def _process_one(msg_id: str, filing, queue: FilingQueue,
                         deduplicator: Deduplicator, ai_client: AIClient) -> None:
