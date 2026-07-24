@@ -7,7 +7,6 @@ class Deduplicator:
     def __init__(self):
         self.seen: set[str] = set()
     
-    @staticmethod
     def is_new(self, content: str) -> bool:
         h = hashlib.sha256(content[:2000].encode()).hexdigest()
         if h in self.seen:

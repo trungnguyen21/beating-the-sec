@@ -31,29 +31,34 @@ class UserConfig:
             with open(file_path, "r") as f:
                 companies = json.loads(f.read())
                 for company in companies:
-                    temp = Company.model_validate_json(company)
+                    temp = Company.model_validate(company)
                     self.companies[temp.ticker] = temp
                 logger.info(f"Loaded {len(companies)} companies successfully")
         except Exception as e:
             logger.info(f"Failed to parse company list: {str(e)}")
-            logger.debug(traceback.format_exc)
+            logger.debug(traceback.format_exc())
             raise
-
 
     def load_user(self, file_path: str):
         try:
             with open(file_path, "r") as f:
                 users = json.loads(f.read())
                 for user in users:
-                    watchlist = set()
-                    for company in user['watchlist']:
-                        company_obj: Company = self.companies[company]
-                        watchlist.add(company_obj)
+                    watchlist = []
+                    for ticker in user['watchlist']:
+                        if ticker not in self.companies:
+                            raise ValueError(f"Ticker '{ticker}' in users.json not found in company registry")
+                        watchlist.append(self.companies[ticker])
 
-                    user_obj = User(user["id"], user["name"], watchlist, user["webhook"])
+                    user_obj = User(
+                        id=user["id"],
+                        name=user["name"],
+                        watchlist=watchlist,
+                        webhook=user["webhook"],
+                    )
                     self.users.append(user_obj)
                 logger.info(f"Loaded {len(users)} users successfully")
         except Exception as e:
             logger.info("Failed to load user list!!")
             logger.debug(traceback.format_exc())
-            raise 
+            raise
