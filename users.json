@@ -2,7 +2,7 @@
     {
         "id": "trung",
         "name": "trung",
-        "watchlist": ["NVDA", "MSFT", "MU"],
-        "webhook": "https://discord.com/api/webhooks/1516915514826428567/_ea7X7_c3d9SXtN-4curByb6ouNtKW60JZ6ZoL6_foTwC3fW_oURcNDhdRsb4IY_t6ww"
+        "watchlist": ["NVDA", "MSFT", "MU", "DELL"],
+        "webhook": "https://discord.com/api/webhooks/1530271671171154101/1KFKB46sFvE9RoYyW0ayZKvNP8fZLRXGGvlOdtkQmO4Et9bTAWJ11t-oO3kK2ABsENa4"
     }
 ]

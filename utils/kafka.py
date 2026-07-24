@@ -1,3 +1,4 @@
+import ssl
 from config import KAFKA_BOOTSTRAP, KAFKA_API_KEY, KAFKA_API_SECRET
 
 def kafka_client_config() -> dict:
@@ -7,4 +8,5 @@ def kafka_client_config() -> dict:
         "sasl_mechanism": "PLAIN",
         "sasl_plain_username": KAFKA_API_KEY,
         "sasl_plain_password": KAFKA_API_SECRET,
+        "ssl_context": ssl.create_default_context(),
     }
