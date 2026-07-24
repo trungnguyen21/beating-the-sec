@@ -23,3 +23,5 @@ KAFKA_RESULTS_TOPIC = "filing_results"
 KAFKA_DLQ_TOPIC    = "filing_dlq"
 KAFKA_AI_GROUP     = "ai_workers"
 KAFKA_DELIVERY_GROUP = "delivery-consumers"
+
+DB_PATH = os.getenv("DB_PATH", "bsec.db")

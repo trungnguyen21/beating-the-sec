@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BSEC Earnings Alerts</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+      padding: 2rem 1rem;
+    }
+
+    .container { max-width: 680px; margin: 0 auto; }
+
+    h1 { font-size: 1.6rem; font-weight: 700; color: #f8fafc; margin-bottom: .25rem; }
+    .subtitle { color: #94a3b8; font-size: .875rem; margin-bottom: 2rem; }
+
+    .card {
+      background: #1e2130;
+      border: 1px solid #2d3148;
+      border-radius: 10px;
+      padding: 1.5rem;
+      margin-bottom: 1.5rem;
+    }
+
+    h2 { font-size: 1rem; font-weight: 600; color: #cbd5e1; margin-bottom: 1rem; }
+
+    label { display: block; font-size: .8rem; color: #94a3b8; margin-bottom: .35rem; }
+
+    input[type="text"], input[type="url"] {
+      width: 100%;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 6px;
+      color: #e2e8f0;
+      padding: .55rem .75rem;
+      font-size: .875rem;
+      margin-bottom: 1rem;
+      outline: none;
+      transition: border-color .15s;
+    }
+    input[type="text"]:focus, input[type="url"]:focus { border-color: #6366f1; }
+
+    .ticker-section label { display: flex; align-items: center; margin-bottom: 0; }
+
+    #ticker-search {
+      margin-bottom: .75rem;
+    }
+
+    .ticker-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
+      gap: .35rem;
+      max-height: 280px;
+      overflow-y: auto;
+      padding: .25rem;
+    }
+
+    .ticker-item {
+      display: flex;
+      align-items: center;
+      gap: .4rem;
+      background: #0f1117;
+      border: 1px solid #2d3148;
+      border-radius: 6px;
+      padding: .4rem .6rem;
+      cursor: pointer;
+      font-size: .8rem;
+      transition: border-color .12s, background .12s;
+      user-select: none;
+    }
+    .ticker-item:hover { border-color: #6366f1; background: #1a1d2e; }
+    .ticker-item input[type="checkbox"] { accent-color: #6366f1; }
+    .ticker-item.selected { border-color: #6366f1; background: #1e1f3a; }
+
+    .ticker-name { font-weight: 600; color: #e2e8f0; }
+    .ticker-count { font-size: .7rem; color: #64748b; margin-top: .1rem; }
+
+    .select-actions {
+      display: flex;
+      gap: .5rem;
+      margin-bottom: .5rem;
+      font-size: .75rem;
+    }
+    .select-actions a { color: #6366f1; cursor: pointer; text-decoration: none; }
+    .select-actions a:hover { text-decoration: underline; }
+
+    button[type="submit"] {
+      width: 100%;
+      background: #6366f1;
+      color: #fff;
+      border: none;
+      border-radius: 6px;
+      padding: .65rem;
+      font-size: .9rem;
+      font-weight: 600;
+      cursor: pointer;
+      margin-top: 1rem;
+      transition: background .15s;
+    }
+    button[type="submit"]:hover { background: #4f52c9; }
+
+    .alert {
+      border-radius: 6px;
+      padding: .75rem 1rem;
+      font-size: .85rem;
+      margin-bottom: 1.25rem;
+    }
+    .alert-success { background: #14532d33; border: 1px solid #166534; color: #86efac; }
+    .alert-error   { background: #7f1d1d33; border: 1px solid #991b1b; color: #fca5a5; }
+    .alert-info    { background: #1e3a5f33; border: 1px solid #1e40af; color: #93c5fd; }
+
+    .divider { border: none; border-top: 1px solid #2d3148; margin: 1.5rem 0; }
+
+    @media (max-width: 480px) {
+      .ticker-grid { grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+<div class="container">
+  <h1>BSEC Earnings Alerts</h1>
+  <p class="subtitle">Get notified on Discord the moment an earnings filing drops.</p>
+
+  {% if success %}
+  <div class="alert alert-success">{{ success }}</div>
+  {% endif %}
+  {% if error %}
+  <div class="alert alert-error">{{ error }}</div>
+  {% endif %}
+  {% if info %}
+  <div class="alert alert-info">{{ info }}</div>
+  {% endif %}
+
+  <!-- Subscribe -->
+  <div class="card">
+    <h2>Subscribe</h2>
+    <form method="post" action="/subscribe">
+      <label for="name">Your name</label>
+      <input type="text" id="name" name="name" placeholder="Alice" value="{{ name or '' }}" required />
+
+      <label for="webhook_url">Discord webhook URL</label>
+      <input type="url" id="webhook_url" name="webhook_url"
+             placeholder="https://discord.com/api/webhooks/…"
+             value="{{ webhook_url or '' }}" required />
+
+      <label>Tickers to watch</label>
+      <input type="text" id="ticker-search" placeholder="Search tickers…" autocomplete="off" />
+
+      <div class="select-actions">
+        <a onclick="selectAll()">Select all</a>
+        <span style="color:#334155">·</span>
+        <a onclick="clearAll()">Clear all</a>
+        <span style="color:#334155" id="selected-count"></span>
+      </div>
+
+      <div class="ticker-grid" id="ticker-grid">
+        {% for t in tickers %}
+        <label class="ticker-item {% if selected_tickers and t.ticker in selected_tickers %}selected{% endif %}">
+          <input type="checkbox" name="tickers" value="{{ t.ticker }}"
+            {% if selected_tickers and t.ticker in selected_tickers %}checked{% endif %} />
+          <span>
+            <div class="ticker-name">{{ t.ticker }}</div>
+            <div class="ticker-count">{{ t.title[:18] }}{% if t.title|length > 18 %}…{% endif %}</div>
+          </span>
+        </label>
+        {% endfor %}
+      </div>
+
+      <button type="submit">Subscribe</button>
+    </form>
+  </div>
+
+  <!-- Unsubscribe -->
+  <div class="card">
+    <h2>Unsubscribe</h2>
+    <form method="post" action="/unsubscribe">
+      <label for="unsub_webhook">Discord webhook URL</label>
+      <input type="url" id="unsub_webhook" name="webhook_url"
+             placeholder="https://discord.com/api/webhooks/…" required />
+      <button type="submit" style="background:#7f1d1d">Remove all my subscriptions</button>
+    </form>
+  </div>
+</div>
+
+<script>
+  const grid = document.getElementById('ticker-grid');
+  const search = document.getElementById('ticker-search');
+  const countEl = document.getElementById('selected-count');
+
+  function updateCount() {
+    const n = grid.querySelectorAll('input:checked').length;
+    countEl.textContent = n ? `· ${n} selected` : '';
+  }
+
+  grid.addEventListener('change', updateCount);
+  updateCount();
+
+  grid.querySelectorAll('.ticker-item').forEach(item => {
+    item.addEventListener('change', () => {
+      item.classList.toggle('selected', item.querySelector('input').checked);
+    });
+  });
+
+  search.addEventListener('input', () => {
+    const q = search.value.toLowerCase();
+    grid.querySelectorAll('.ticker-item').forEach(item => {
+      const text = item.textContent.toLowerCase();
+      item.style.display = text.includes(q) ? '' : 'none';
+    });
+  });
+
+  function selectAll() {
+    grid.querySelectorAll('.ticker-item').forEach(item => {
+      if (item.style.display !== 'none') {
+        item.querySelector('input').checked = true;
+        item.classList.add('selected');
+      }
+    });
+    updateCount();
+  }
+
+  function clearAll() {
+    grid.querySelectorAll('input').forEach(cb => cb.checked = false);
+    grid.querySelectorAll('.ticker-item').forEach(item => item.classList.remove('selected'));
+    updateCount();
+  }
+</script>
+</body>
+</html>
