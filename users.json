@@ -1,7 +1,8 @@
 [
     {
-        "name": "trung", 
-        "watchlist": ["NVDA", "MSFT", "MU"], 
-        "webhook": "https://test.com"
+        "id": "trung",
+        "name": "trung",
+        "watchlist": ["NVDA", "MSFT", "MU"],
+        "webhook": "https://discord.com/api/webhooks/1516915514826428567/_ea7X7_c3d9SXtN-4curByb6ouNtKW60JZ6ZoL6_foTwC3fW_oURcNDhdRsb4IY_t6ww"
     }
 ]
