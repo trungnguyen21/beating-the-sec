@@ -12,6 +12,7 @@ from ingestion.estimates import fetch_estimates
 from config import KAFKA_RAW_TOPIC, KAFKA_RESULTS_TOPIC, KAFKA_DLQ_TOPIC, KAFKA_AI_GROUP, KAFKA_DELIVERY_GROUP
 from workers.client import GeminiClient
 from delivery.webhook import DiscordWebhook
+from server.db import get_subscribers_for_ticker, save_alert
 from utils.kafka import kafka_client_config
 from utils.logger import get_logger
 
@@ -80,6 +81,7 @@ async def run_ai_worker(worker_id: str):
                         results = await analyze_filing(sections, ai_client, estimates)
                         alert = build_alert(filing["ticker"], results, filing["detected_at"])
 
+                        await save_alert(filing["ticker"], alert)
                         await producer.send(KAFKA_RESULTS_TOPIC, json.dumps(alert).encode())
                         await consumer.commit()
                         logger.info(f"AI worker {worker_id} processed {filing['ticker']}")
@@ -94,7 +96,7 @@ async def run_ai_worker(worker_id: str):
         logger.info(f"AI worker {worker_id} stopped")
 
 
-async def run_delivery_consumer(subscription_map: dict):
+async def run_delivery_consumer():
     consumer = AIOKafkaConsumer(
         KAFKA_RESULTS_TOPIC,
         **kafka_client_config(),
@@ -109,7 +111,7 @@ async def run_delivery_consumer(subscription_map: dict):
         async for msg in consumer:
             alert = json.loads(msg.value)
             ticker = alert["ticker"]
-            subscribers = subscription_map.get(ticker, [])
+            subscribers = await get_subscribers_for_ticker(ticker)
 
             if not subscribers:
                 logger.warning(f"No subscribers for {ticker}")
@@ -118,10 +120,10 @@ async def run_delivery_consumer(subscription_map: dict):
 
             for sub in subscribers:
                 try:
-                    await DiscordWebhook(sub.webhook).send(alert)
-                    logger.info(f"  ✓ {sub.id}")
+                    await DiscordWebhook(sub["webhook_url"]).send(alert)
+                    logger.info(f"  ✓ {sub['id']}")
                 except Exception as e:
-                    logger.error(f"  ✗ {sub.id}: {e}")
+                    logger.error(f"  ✗ {sub['id']}: {e}")
 
             await consumer.commit()
     finally:
