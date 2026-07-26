@@ -27,7 +27,9 @@ from pipeline.dispatcher import analyze_filing
 from aggregator.aggregator import build_alert
 from workers.client import GeminiClient
 from ingestion.estimates import fetch_estimates
-from delivery.webhook import DiscordWebhook
+from delivery.router import SubscriptionRouter
+from utils.load_user import UserConfig
+from main import _build_subscription_map
 
 
 def _section(title: str) -> None:
@@ -37,17 +39,21 @@ def _section(title: str) -> None:
     print(f"{'=' * width}")
 
 
+SAMPLE_HTML = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "DELL.html")
+
 def _load_filing(html_path: str | None) -> tuple[str, str]:
     """Return (content, content_type) for the filing to test."""
-    if html_path:
-        with open(html_path) as f:
-            return f.read(), "html"
-    print("No file provided — using bundled HTML sample (NVDA Q3 FY2025 earnings).")
-    return None, "html"
+    path = html_path or SAMPLE_HTML
+    print(f"Loading filing from: {path}")
+    with open(path) as f:
+        return f.read(), "html"
 
 
 async def run() -> None:
+    # Usage: python test_e2e_parsing_pipeline.py [path/to/filing.html] [TICKER]
+    # Defaults: data/DELL.html, ticker NVDA (must be in your users.json watchlist)
     html_path = sys.argv[1] if len(sys.argv) > 1 else None
+    ticker_override = sys.argv[2] if len(sys.argv) > 2 else None
 
     # ------------------------------------------------------------------
     # STEP 1: Load filing
@@ -78,7 +84,12 @@ async def run() -> None:
     # STEP 3: Spawn 3 agents concurrently
     # ------------------------------------------------------------------
     _section("STEP 3 — Fetch Analyst Estimates")
-    ticker = "NVDA" if not html_path else os.path.basename(html_path).split(".")[0].upper()
+    if ticker_override:
+        ticker = ticker_override.upper()
+    elif html_path:
+        ticker = os.path.basename(html_path).split(".")[0].upper()
+    else:
+        ticker = "NVDA"  # default — must be in users.json watchlist to receive the alert
     estimates = await fetch_estimates(ticker)
     print(f"Estimates for {ticker}: {estimates}")
 
@@ -149,9 +160,20 @@ async def run() -> None:
         print("One or more checks failed — see above.")
         sys.exit(1)
 
-    print("STEP 8 - Delivery")
-    delivery = DiscordWebhook(os.environ["DISCORD_WEBHOOK_URL"])
-    await delivery.send(alert=alert)
+    _section("STEP 8 — Fan-out via SubscriptionRouter")
+    user_config = UserConfig()
+    user_config.load_configs("watchlist.json", "users.json")
+    subscription_map = _build_subscription_map(user_config)
+    router = SubscriptionRouter(subscription_map)
+
+    subscribers = subscription_map.get(ticker, [])
+    if not subscribers:
+        print(f"  ⚠  No subscribers for {ticker} in users.json — alert built but not sent.")
+        print(f"     Add '{ticker}' to a user's watchlist to receive the Discord message.")
+    else:
+        print(f"  Sending to {len(subscribers)} subscriber(s) for {ticker}...")
+        await router.fanout(ticker, alert)
+        print("  Done — check your Discord channel.")
 
 
 if __name__ == "__main__":

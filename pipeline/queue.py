@@ -1,16 +1,39 @@
 # pipeline/queue.py
 import asyncio
 import json
+
 from typing import AsyncIterator, Protocol
-
 import redis.asyncio as redis
+from aiokafka import AIOKafkaProducer
 
+from config import KAFKA_RAW_TOPIC
+from utils.kafka import kafka_client_config
 
 class FilingQueue(Protocol):
     async def enqueue(self, filing: dict) -> None: ...
     def consume(self) -> AsyncIterator[tuple[str, dict]]: ...
     async def ack(self, msg_id: str) -> None: ...
 
+class KafkaFilingQueue:
+    async def __aenter__(self):
+        self._producer = AIOKafkaProducer(**kafka_client_config())
+        await self._producer.start()
+        return self
+
+    async def enqueue(self, filing) -> None:
+        payload = {
+            "ticker": filing.ticker,
+            "cik": filing.cik,
+            "accession": filing.accession,
+            "index_url": filing.index_url,
+            "detected_at": filing.detected_at,
+        }
+        await self._producer.send(KAFKA_RAW_TOPIC, json.dumps(payload).encode())
+    async def ack(self, _msg_id: str) -> None:
+        pass  # Kafka offsets are committed by the consumer, not the producer
+
+    async def __aexit__(self, *_):
+        await self._producer.stop()
 
 class RedisFilingQueue:
     def __init__(self, redis_url: str = "redis://localhost:6379"):
