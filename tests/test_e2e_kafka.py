@@ -40,7 +40,7 @@ from utils.load_user import UserConfig
 
 REPO_ROOT    = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAMPLE_HTML  = os.path.join(REPO_ROOT, "data", "DELL.html")
-TIMEOUT      = 60  # seconds — covers Kafka poll delay + AI analysis time
+TIMEOUT      = 120  # seconds — covers Kafka poll delay + AI analysis time
 
 
 def _section(title: str) -> None:
