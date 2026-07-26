@@ -109,11 +109,13 @@ def _parse_args() -> argparse.Namespace:
 async def main():
     args = _parse_args()
 
-    user_config = UserConfig()
-    user_config.load_configs("watchlist.json", "users.json")
-
-    subscription_map = _build_subscription_map(user_config)
-    unified_watchlist = _build_unified_watchlist(user_config)
+    subscription_map: dict = {}
+    unified_watchlist: list = []
+    if args.stage != "ai-worker":
+        user_config = UserConfig()
+        user_config.load_configs("watchlist.json", "users.json")
+        subscription_map = _build_subscription_map(user_config)
+        unified_watchlist = _build_unified_watchlist(user_config)
     router = SubscriptionRouter(subscription_map)
 
     if args.stage == "ingestion":
