@@ -98,8 +98,12 @@ async def run() -> None:
         print(f"\n  🚨 Discord delivery confirmed — {alert.get('ticker')} alert sent")
         delivery_event.set()
 
+    async def _mock_fetch_filing_document(*_args, **_kwargs) -> str:
+        ai_consumed_event.set()
+        return sample_html
+
     with patch("pipeline.kafka_consumer.fetch_filing_document",
-               new=AsyncMock(return_value=sample_html)), \
+               new=AsyncMock(side_effect=_mock_fetch_filing_document)), \
          patch("pipeline.kafka_consumer.fetch_estimates",
                new=AsyncMock(return_value={})), \
          patch.object(DiscordWebhook, "send", _intercepted_send):
