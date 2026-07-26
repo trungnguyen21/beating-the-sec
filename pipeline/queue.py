@@ -21,8 +21,14 @@ class KafkaFilingQueue:
         return self
 
     async def enqueue(self, filing) -> None:
-        await self._producer.send(KAFKA_RAW_TOPIC, json.dumps(filing.__dict__).encode())
-
+        payload = {
+            "ticker": filing.ticker,
+            "cik": filing.cik,
+            "accession": filing.accession,
+            "index_url": filing.index_url,
+            "detected_at": filing.detected_at,
+        }
+        await self._producer.send(KAFKA_RAW_TOPIC, json.dumps(payload).encode())
     async def ack(self, _msg_id: str) -> None:
         pass  # Kafka offsets are committed by the consumer, not the producer
 
