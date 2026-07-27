@@ -12,6 +12,64 @@ from models.model_detectors import DetectorResult, DetectorSource
 logger = get_logger(__name__)
 
 
+async def poll_company_once(
+    company: dict,
+    client: httpx.AsyncClient,
+    seen: set[str],
+    max_age_hours: float = 3.0,
+) -> DetectorResult | None:
+    """
+    Single attempt: fetch the company's SEC RSS feed and return a DetectorResult if a new
+    actionable 8-K is found, else None. Does not loop or sleep — callers control cadence
+    (detect_via_rss's own loop, or an external scheduler like rotation_scheduler.py).
+    `seen` is owned by the caller so it persists across calls.
+    Per-poll soft age check: entries older than max_age_hours are skipped, not blocked on.
+    Raises on request/parse errors — callers decide how to handle a failed poll.
+    """
+    ticker = company["ticker"]
+    rss_url = (
+        f"https://www.sec.gov/cgi-bin/browse-edgar"
+        f"?action=getcompany&CIK={company['cik']}&type=8-K&output=atom"
+    )
+
+    r = await client.get(rss_url, headers=HEADERS, timeout=10)
+    feed = feedparser.parse(r.text)
+
+    for entry in feed.entries[:1]:
+        items_desc = entry.get('items-desc', '')
+        pipelines = classify_items(items_desc)
+        if not pipelines:
+            continue
+
+        filed_at = None
+        if hasattr(entry, 'updated_parsed') and entry.updated_parsed:
+            filed_at = datetime.fromtimestamp(
+                calendar.timegm(entry.updated_parsed), tz=timezone.utc
+            )
+            age = datetime.now(timezone.utc) - filed_at
+            if age > timedelta(hours=max_age_hours):
+                logger.debug(f"RSS: {ticker} — entry {age} old, skipping")
+                continue
+
+        link_hash = hashlib.sha256(entry.link.encode()).hexdigest()
+        if link_hash in seen:
+            continue
+        seen.add(link_hash)
+
+        logger.info(f"📡 RSS hit for {ticker}: {entry.title} — {pipelines} - {entry['filing-href']}")
+        return DetectorResult(
+            ticker=company["ticker"],
+            cik=company["cik"],
+            accession=entry.get('accession-number', ''),
+            index_url=entry.link,
+            detected_at=datetime.now(timezone.utc).isoformat(),
+            source=DetectorSource.RSS_POLLER,
+            filed_at=filed_at,
+        )
+
+    return None
+
+
 async def detect_via_rss(
     company: dict,
     client: httpx.AsyncClient,
@@ -20,53 +78,17 @@ async def detect_via_rss(
 ) -> dict:
     """
     Poll the SEC RSS feed until a new actionable 8-K appears.
-    `seen` is owned by the caller (watch_company) so it persists across races.
-    Per-poll soft age check: entries older than max_age_hours are skipped, not blocked on.
+    Thin wrapper around poll_company_once for callers that want "poll this one company
+    forever" behavior (e.g. local dev/testing without the rotation scheduler).
     """
     ticker = company["ticker"]
-    rss_url = (
-        f"https://www.sec.gov/cgi-bin/browse-edgar"
-        f"?action=getcompany&CIK={company['cik']}&type=8-K&output=atom"
-    )
-    logger.info(f"Watching the RSS feed at {rss_url}")
+    logger.info(f"Watching the RSS feed for {ticker}")
 
     while True:
         try:
-            r = await client.get(rss_url, headers=HEADERS, timeout=10)
-            feed = feedparser.parse(r.text)
-
-            for entry in feed.entries[:1]:
-                items_desc = entry.get('items-desc', '')
-                pipelines = classify_items(items_desc)
-                if not pipelines:
-                    continue
-
-                filed_at = None
-                if hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-                    filed_at = datetime.fromtimestamp(
-                        calendar.timegm(entry.updated_parsed), tz=timezone.utc
-                    )
-                    age = datetime.now(timezone.utc) - filed_at
-                    if age > timedelta(hours=max_age_hours):
-                        logger.debug(f"RSS: {ticker} — entry {age} old, skipping")
-                        continue
-
-                link_hash = hashlib.sha256(entry.link.encode()).hexdigest()
-                print(seen)
-                if link_hash in seen:
-                    continue
-                seen.add(link_hash)
-
-                logger.info(f"📡 RSS hit for {ticker}: {entry.title} — {pipelines} - {entry['filing-href']}")
-                return DetectorResult(
-                    ticker=company["ticker"],
-                    cik=company["cik"],
-                    accession=entry.get('accession-number', ''),
-                    index_url=entry.link,
-                    detected_at=datetime.now(timezone.utc).isoformat(),
-                    source=DetectorSource.RSS_POLLER,
-                    filed_at=filed_at,
-                )
+            result = await poll_company_once(company, client, seen, max_age_hours)
+            if result:
+                return result
         except Exception as e:
             logger.error(f"RSS poll error ({ticker}): {e}")
             # Continue looping — a transient error shouldn't kill the detector.
