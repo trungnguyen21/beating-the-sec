@@ -16,11 +16,11 @@ Log level is controlled by `LOGGING_LEVEL` in `config.py` (default: `INFO`).
 
 ```python
 {
-    "bootstrap_servers": CONFLUENT_BOOTSTRAP,
+    "bootstrap_servers": KAFKA_BOOTSTRAP,
     "security_protocol": "SASL_SSL",
     "sasl_mechanism": "PLAIN",
-    "sasl_plain_username": CONFLUENT_API_KEY,
-    "sasl_plain_password": CONFLUENT_API_SECRET,
+    "sasl_plain_username": KAFKA_API_KEY,
+    "sasl_plain_password": KAFKA_API_SECRET,
     "ssl_context": ssl.create_default_context(),
 }
 ```
