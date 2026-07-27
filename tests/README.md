@@ -40,8 +40,8 @@ end-to-end. Does not touch Kafka.
 ---
 
 ### `test_e2e_kafka.py`
-Full three-stage Kafka pipeline: publish to `raw-filings` → AI worker consumes →
-`filing-results` → delivery consumer → Discord. Override via `SAMPLE_FILING_PATH` /
+Full three-stage Kafka pipeline: publish to `raw_filings` → AI worker consumes →
+`filing_results` → delivery consumer → Discord. Override via `SAMPLE_FILING_PATH` /
 `SAMPLE_FILING_TICKER` env vars (defaults: `data/DELL.html`, ticker `DELL`).
 
 **Mocked**: `fetch_filing_document` (returns `data/DELL.html`), `fetch_estimates` (returns `{}`)
@@ -57,7 +57,7 @@ stalled (AI consumed? Discord delivered?).
 
 **Requires**: `CONFLUENT_BOOTSTRAP`, `CONFLUENT_API_KEY`, `CONFLUENT_API_SECRET` in `.env`,
 an active Confluent cluster (Basic clusters auto-pause — resume in the UI if needed),
-`raw-filings` and `filing-results` topics created. Skips if the ticker has no subscribers.
+`raw_filings` and `filing_results` topics created. Skips if the ticker has no subscribers.
 
 ---
 

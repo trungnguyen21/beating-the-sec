@@ -20,7 +20,7 @@ logger = get_logger(__name__)
 
 
 class KafkaFilingQueue:
-    """Producer-side queue: serialises DetectorResult metadata into raw-filings topic.
+    """Producer-side queue: serialises DetectorResult metadata into raw_filings topic.
     Raw text is intentionally excluded — Stage 2 (run_ai_worker) fetches it directly."""
 
     async def __aenter__(self):
