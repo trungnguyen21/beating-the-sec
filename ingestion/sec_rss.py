@@ -76,7 +76,7 @@ async def detect_via_rss(
     seen: set[str],
     max_age_hours: float = 3.0,
 ) -> DetectorResult:
-    Poll the SEC RSS feed until a new actionable 8-K appears.
+    """Poll the SEC RSS feed until a new actionable 8-K appears.
     Thin wrapper around poll_company_once for callers that want "poll this one company
     forever" behavior (e.g. local dev/testing without the rotation scheduler).
     """
