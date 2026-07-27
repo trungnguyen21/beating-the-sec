@@ -71,10 +71,7 @@ async def test_e2e_kafka_pipeline():
 
     ai_consumed_event = asyncio.Event()   # fires when AI worker picks up the message
     delivery_event = asyncio.Event()      # fires when Discord webhook is called
-    original_send = DiscordWebhook.send
-
     async def _intercepted_send(self, alert: dict) -> None:
-        await original_send(self, alert)
         delivery_event.set()
 
     async def _mock_fetch_filing_document(*_args, **_kwargs) -> str:
