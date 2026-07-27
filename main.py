@@ -1,6 +1,7 @@
 # main.py
 import argparse
 import asyncio
+import json
 import traceback
 from ingestion.watcher import run_watcher
 from ingestion.deduplicator import Deduplicator
@@ -92,11 +93,21 @@ async def process_filings(queue: FilingQueue, deduplicator: Deduplicator,
         asyncio.create_task(bounded(msg_id, filing))
 
 
+def _load_all_tickers(watchlist_path: str) -> list:
+    """Load every ticker from watchlist.json — used by the ingestion stage."""
+    with open(watchlist_path) as f:
+        raw = json.load(f)
+    return [
+        {"ticker": item["ticker"], "cik": str(int(item["cik"])).zfill(10)}
+        for item in raw
+    ]
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SEC filing alert pipeline")
     parser.add_argument(
         "--stage",
-        choices=["ingestion", "ai-worker", "delivery"],
+        choices=["ingestion", "ai-worker", "delivery", "server"],
         default=None,
         help=(
             "Run a single pipeline stage independently. "
@@ -109,28 +120,34 @@ def _parse_args() -> argparse.Namespace:
 async def main():
     args = _parse_args()
 
-    subscription_map: dict = {}
-    unified_watchlist: list = []
-    if args.stage != "ai-worker":
-        user_config = UserConfig()
-        user_config.load_configs("watchlist.json", "users.json")
-        subscription_map = _build_subscription_map(user_config)
-        unified_watchlist = _build_unified_watchlist(user_config)
-    router = SubscriptionRouter(subscription_map)
-
     if args.stage == "ingestion":
+        # Watch every ticker in watchlist.json — subscribers are managed in the DB,
+        # not the watchlist, so we poll everything and let the delivery consumer filter.
+        watchlist = _load_all_tickers("watchlist.json")
         async with KafkaFilingQueue() as queue:
-            await run_watcher(unified_watchlist, queue)
+            await run_watcher(watchlist, queue)
 
     elif args.stage == "ai-worker":
         await run_ai_worker("worker-1")
 
     elif args.stage == "delivery":
-        await run_delivery_consumer(subscription_map)
+        # Subscription lookup is done per-message against SQLite — no startup config needed.
+        await run_delivery_consumer()
+
+    elif args.stage == "server":
+        import uvicorn
+        from server.app import app as web_app
+        config = uvicorn.Config(web_app, host="0.0.0.0", port=8000)
+        await uvicorn.Server(config).serve()
 
     else:
-        # Dev mode: all three stages run in a single process using an in-memory queue.
-        # No Kafka required — swap InMemoryFilingQueue for KafkaFilingQueue to go multi-process.
+        # Dev mode: single-process, in-memory queue, reads users.json for delivery routing.
+        user_config = UserConfig()
+        user_config.load_configs("watchlist.json", "users.json")
+        subscription_map = _build_subscription_map(user_config)
+        unified_watchlist = _build_unified_watchlist(user_config)
+        router = SubscriptionRouter(subscription_map)
+
         queue = InMemoryFilingQueue()
         deduplicator = Deduplicator()
         async with GeminiClient() as ai_client:
