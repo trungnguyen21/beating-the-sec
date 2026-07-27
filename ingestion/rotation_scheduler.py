@@ -101,8 +101,9 @@ async def run_rotation(
          failure never blocks or cancels the rest of the batch.
     """
     queue: deque = deque(hot_set_provider.current_hot_companies())
+    if detection_budget <= 0:
+        raise ValueError("detection_budget must be >= 1")
     seen_map: dict[str, set[str]] = {}
-
     while True:
         _sync_queue(queue, hot_set_provider.current_hot_companies())
 
