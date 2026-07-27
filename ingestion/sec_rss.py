@@ -33,8 +33,8 @@ async def poll_company_once(
     )
 
     r = await client.get(rss_url, headers=HEADERS, timeout=10)
+    r.raise_for_status()
     feed = feedparser.parse(r.text)
-
     for entry in feed.entries[:1]:
         items_desc = entry.get('items-desc', '')
         pipelines = classify_items(items_desc)
