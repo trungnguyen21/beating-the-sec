@@ -6,8 +6,9 @@ from utils.logger import get_logger
 from ingestion.edgar_poller import get_last_accession, next_accession, poll_for_filing, fetch_filing_document
 from ingestion.sec_rss import detect_via_rss
 from ingestion.estimates import fetch_estimates
+from ingestion.rotation_scheduler import FixedHotSet, CooldownAwareHotSet, run_rotation
 from models.model_detectors import DetectorResult
-from config import MAX_FILING_AGE_HOURS, POST_FILING_COOLDOWN_HOURS
+from config import MAX_FILING_AGE_HOURS, POST_FILING_COOLDOWN_HOURS, DETECTION_BUDGET
 
 logger = get_logger(__name__)
 
@@ -48,8 +49,11 @@ async def _detect_filing(
 
 async def watch_company(company: dict, client: httpx.AsyncClient, queue) -> None:
     """
-    Continuously watch a single company. After each detected filing is enqueued,
-    loops back to wait for the next one — runs until cancelled.
+    Continuously watch a single company via its own independent detector race.
+    Superseded by run_watcher's rotation-scheduler-based orchestration below for actual
+    production use (see docs/checklist.md Phase 4) — kept here as the primitive
+    tests/test_e2e_rss_detection.py exercises directly, and as a reference implementation of
+    the per-company race semantics the rotation scheduler now runs at fleet scale instead.
     """
     ticker = company["ticker"]
     logger.info(f"👁  Watching {ticker} (CIK: {company['cik']})")
@@ -89,5 +93,51 @@ async def watch_company(company: dict, client: httpx.AsyncClient, queue) -> None
 
 
 async def run_watcher(watchlist: list, queue) -> None:
+    """
+    Fleet-scale orchestration (docs/checklist.md Phase 4): instead of one independent
+    detector race per company (watch_company, above), all companies are driven through a
+    shared budget-capped rotation scheduler.
+
+    run_backstop_poller (ingestion/backstop_poller.py) is deliberately NOT wired in here.
+    Its accession-prediction trick (next_accession + build_index_url) assumes accession
+    numbers increment predictably and that every filer's index URL follows the same naming
+    convention — observed in practice to be unreliable across enough companies (different
+    filing agents assign accession numbers differently) to not trust as a live detection
+    path. Kept in the codebase for a future, more robust per-filer approach — not deleted,
+    just not called.
+
+    Hot-set source is currently a stub — FixedHotSet treats the entire watchlist as always
+    hot, since calendar-based gating (Phase 6) hasn't been built yet. CooldownAwareHotSet
+    still applies POST_FILING_COOLDOWN_HOURS on top of the stub so a company that just fired
+    isn't immediately re-polled next tick, preserving watch_company's original cooldown
+    behavior even without real calendar gating.
+    """
     async with httpx.AsyncClient() as client:
-        await asyncio.gather(*[watch_company(company, client, queue) for company in watchlist])
+        base_hot_set = FixedHotSet(watchlist)
+        hot_set = CooldownAwareHotSet(base_hot_set, POST_FILING_COOLDOWN_HOURS)
+
+        async def on_detected(company: dict, result: DetectorResult) -> None:
+            ticker = company["ticker"]
+            result.ticker = ticker
+            logger.info(f"🏁 {ticker} detected")
+
+            raw_text, estimates = await asyncio.gather(
+                fetch_filing_document(result.index_url, client),
+                fetch_estimates(ticker),
+            )
+
+            if not raw_text:
+                logger.warning(f"No exhibit found for {ticker} — skipping")
+            else:
+                result.raw_text = raw_text
+                result.estimates = estimates
+                await queue.enqueue(result)
+
+            hot_set.mark_detected(ticker)
+            logger.info(f"💤 {ticker} — cooling down for {POST_FILING_COOLDOWN_HOURS}h")
+
+        await run_rotation(
+            hot_set, client, on_detected,
+            detection_budget=DETECTION_BUDGET,
+            max_age_hours=MAX_FILING_AGE_HOURS,
+        )
