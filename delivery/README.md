@@ -56,5 +56,5 @@ Result: `{ "NVDA": [trung], "MSFT": [trung], "MU": [trung] }`
 ## Adding a new delivery channel
 
 1. Implement the `AlertDelivery` protocol: `async def send(self, alert: dict) -> None`
-2. In the Kafka path: add a new independent consumer group on the `filing-results` topic in `pipeline/kafka_consumer.py` — nothing upstream needs to change
+2. In the Kafka path: add a new independent consumer group on the `filing_results` topic in `pipeline/kafka_consumer.py` — nothing upstream needs to change
 3. In the single-process path: call it alongside `router.fanout` in `main.py`'s `_process_one`

@@ -51,7 +51,7 @@ extraction, sentiment, risk = await asyncio.gather(
 ### `kafka_consumer.py`
 All Kafka-side logic: producer queue for ingestion, AI worker consumer, delivery consumer.
 
-**`KafkaFilingQueue`** — async context manager. Wraps an `AIOKafkaProducer` and publishes slim filing metadata to the `raw-filings` topic. Used when running `--stage ingestion`.
+**`KafkaFilingQueue`** — async context manager. Wraps an `AIOKafkaProducer` and publishes slim filing metadata to the `raw_filings` topic. Used when running `--stage ingestion`.
 
 ```python
 async with KafkaFilingQueue() as queue:
@@ -60,16 +60,16 @@ async with KafkaFilingQueue() as queue:
 
 Only metadata is published (ticker, cik, accession, index_url, detected_at). Raw text is intentionally excluded — the AI worker fetches the document itself in Stage 2.
 
-**`run_ai_worker(worker_id)`** — Kafka consumer on `raw-filings`. For each message:
+**`run_ai_worker(worker_id)`** — Kafka consumer on `raw_filings`. For each message:
 1. Fetches filing document from SEC
 2. Normalizes and deduplicates
 3. Runs AI analysis
-4. Publishes result to `filing-results`
-5. On failure: publishes original message to `filing-dlq` (dead-letter)
+4. Publishes result to `filing_results`
+5. On failure: publishes original message to `filing_dlq` (dead-letter)
 
 Lifecycle: `await consumer.start()` / `await producer.start()` before the loop, both stopped in `finally`. `GeminiClient` and `httpx.AsyncClient` are created as async context managers inside the function — not at module level.
 
-**`run_delivery_consumer(subscription_map)`** — Kafka consumer on `filing-results`. For each message, looks up subscribers by ticker and calls `DiscordWebhook.send()` for each. Error-isolated per subscriber.
+**`run_delivery_consumer()`** — Kafka consumer on `filing_results`. For each message, looks up subscribers by ticker (per-message against SQLite, no startup config needed) and calls `DiscordWebhook.send()` for each. Error-isolated per subscriber.
 
 ---
 
@@ -77,9 +77,9 @@ Lifecycle: `await consumer.start()` / `await producer.start()` before the loop, 
 
 | Topic | Written by | Read by | Retention |
 |---|---|---|---|
-| `raw-filings` | `KafkaFilingQueue` (ingestion) | `run_ai_worker` | 7 days |
-| `filing-results` | `run_ai_worker` | `run_delivery_consumer` | 7 days |
-| `filing-dlq` | `run_ai_worker` (on failure) | manual inspection / replay | 30 days |
+| `raw_filings` | `KafkaFilingQueue` (ingestion) | `run_ai_worker` | 7 days |
+| `filing_results` | `run_ai_worker` | `run_delivery_consumer` | 7 days |
+| `filing_dlq` | `run_ai_worker` (on failure) | manual inspection / replay | 30 days |
 
 ---
 
@@ -93,8 +93,8 @@ All in one process. InMemoryFilingQueue connects watcher output directly to the 
 
 **Prod (Kafka)**
 ```
-main.py --stage ingestion  → run_watcher → KafkaFilingQueue → raw-filings topic
-main.py --stage ai-worker  → run_ai_worker → filing-results topic
+main.py --stage ingestion  → run_watcher → KafkaFilingQueue → raw_filings topic
+main.py --stage ai-worker  → run_ai_worker → filing_results topic
 main.py --stage delivery   → run_delivery_consumer → Discord
 ```
 Three independent processes. Scale `ai-worker` horizontally — Kafka consumer groups handle partition assignment automatically.

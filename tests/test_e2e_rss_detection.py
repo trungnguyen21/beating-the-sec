@@ -1,31 +1,24 @@
 """
-E2E test: RSS detection pipeline.
+RSS detection pipeline test (fully mocked — no real network, no e2e marker needed).
 
 Verifies that:
   1. The RSS feed and EDGAR poller race correctly via asyncio.wait(FIRST_COMPLETED)
   2. When the EDGAR poller never finds the filing (HEAD always 404), RSS wins
   3. The RSS feed is empty on the first poll, then updated to include a fresh 8-K
-  4. Filing metadata (accession, pipelines, index_url) is extracted correctly
+  4. Filing metadata (accession, index_url) is extracted correctly onto DetectorResult
   5. The exhibit document is fetched, normalized, and split into sections
 
 Stops before AI analysis — no API key required.
-
-Run with:
-    python tests/test_e2e_rss_detection.py
 """
 
 import asyncio
-import os
-import sys
-import time as time_mod
 import time
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
+import pytest
 from dotenv import load_dotenv
+
 load_dotenv()
 
-from pprint import pprint
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # Saved before any patching. Used inside mock HTTP handlers to call
@@ -37,7 +30,9 @@ _real_sleep = asyncio.sleep
 
 from ingestion.watcher import _detect_filing
 from ingestion.edgar_poller import fetch_filing_document
+from ingestion.classifier import classify_items
 from pipeline.normalizer import normalize, split_sections
+from models.model_detectors import DetectorSource
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -47,6 +42,7 @@ COMPANY = {"ticker": "NVDA", "cik": "1045810"}
 
 LAST_ACCESSION      = "0001213900-26-000001"
 PREDICTED_ACCESSION = "0001213900-26-000002"
+ITEMS_DESC          = "Item 2.02: Results of Operations and Financial Condition"
 
 # Must match build_index_url("1045810", "0001213900-26-000002")
 INDEX_URL = (
@@ -54,77 +50,10 @@ INDEX_URL = (
     "000121390026000002/0001213900-26-000002-index.htm"
 )
 
-MOCK_INDEX_HTML = f"""\
-<?xml version="1.0" encoding="ISO-8859-1" ?>
-  <feed xmlns="http://www.w3.org/2005/Atom">
-    <author>
-      <email>webmaster@sec.gov</email>
-      <name>Webmaster</name>
-    </author>
-    <company-info>
-      <addresses>
-        <address type="mailing">
-          <city>DUBLIN</city>
-          <state>L2</state>
-          <street1>1 GRAND CANAL SQUARE</street1>
-          <street2>GRAND CANAL HARBOUR</street2>
-          <zip>D2</zip>
-        </address>
-        <address type="business">
-          <city>DUBLIN</city>
-          <phone>353-1-646-2000</phone>
-          <state>L2</state>
-          <street1>1 GRAND CANAL SQUARE</street1>
-          <street2>GRAND CANAL HARBOUR</street2>
-          <zip>D2</zip>
-        </address>
-      </addresses>
-      <assigned-sic>7389</assigned-sic>
-      <assigned-sic-desc>SERVICES-BUSINESS SERVICES, NEC</assigned-sic-desc>
-      <assigned-sic-href>https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&amp;SIC=7389&amp;owner=include&amp;count=40</assigned-sic-href>
-      <cik>0001467373</cik>
-      <cik-href>https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&amp;CIK=0001467373&amp;owner=include&amp;count=40</cik-href>
-      <conformed-name>Accenture plc</conformed-name>
-      <fiscal-year-end>0831</fiscal-year-end>
-      <formerly-names count="1">
-        <names>
-          <date>2026-06-08</date>
-          <name>Accenture plc</name>
-        </names>
-      </formerly-names>
-      <state-location>L2</state-location>
-      <state-location-href>https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&amp;State=L2&amp;owner=include&amp;count=40</state-location-href>
-      <state-of-incorporation>L2</state-of-incorporation>
-    </company-info>
-    <entry>
-      <category label="form type" scheme="https://www.sec.gov/" term="8-K" />
-      <content type="text/xml">
-        <accession-number>0001467373-26-000019</accession-number>
-        <act>34</act>
-        <file-number>001-34448</file-number>
-        <file-number-href>https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&amp;filenum=001-34448&amp;owner=include&amp;count=40</file-number-href>
-        <filing-date>2026-04-24</filing-date>
-        <filing-href>https://www.sec.gov/Archives/edgar/data/1467373/000146737326000019/0001467373-26-000019-index.htm</filing-href>
-        <filing-type>8-K</filing-type>
-        <film-number>26890399</film-number>
-        <form-name>Current report</form-name>
-        <items-desc>items 1.01, 1.02, 2.03and9.01</items-desc>
-        <size>105 MB</size>
-        <xbrl_href>https://www.sec.gov/cgi-bin/viewer?action=view&amp;cik=1467373&amp;accession_number=0001467373-26-000019&amp;xbrl_type=v</xbrl_href>
-      </content>
-      <id>urn:tag:sec.gov,2008:accession-number=0001467373-26-000019</id>
-      <link href="https://www.sec.gov/Archives/edgar/data/1467373/000146737326000019/0001467373-26-000019-index.htm" rel="alternate" type="text/html" />
-      <summary type="html"> &lt;b&gt;Filed:&lt;/b&gt; 2026-04-24 &lt;b&gt;AccNo:&lt;/b&gt; 0001467373-26-000019 &lt;b&gt;Size:&lt;/b&gt; 105 MB&lt;br&gt;Item 1.01: Entry into a Material Definitive Agreement&lt;br&gt;Item 1.02: Termination of a Material Definitive Agreement&lt;br&gt;Item 2.03: Creation of a Direct Financial Obligation or an Obligation under an Off-Balance Sheet Arrangement of a Registrant&lt;br&gt;Item 9.01: Financial Statements and Exhibits</summary>
-      <title>8-K  - Current report</title>
-      <updated>2026-04-24T06:35:41-04:00</updated>
-    </entry>
-    <id>https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&amp;CIK=0001467373</id>
-    <link href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&amp;CIK=0001467373&amp;type=8-K&amp;start=0&amp;count=40" rel="alternate" type="text/html" />
-    <link href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&amp;CIK=0001467373&amp;type=8-K&amp;start=0&amp;count=40&amp;output=atom" rel="self" type="application/atom+xml" />
-    <link href="https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&amp;CIK=0001467373&amp;type=8-K%25&amp;datea=&amp;dateb=&amp;owner=include&amp;count=40&amp;output=atom&amp;start=40" rel="next" type="application/atom+xml" />
-    <title>Accenture plc  (0001467373)</title>
-    <updated>2026-06-17T22:31:44-04:00</updated>
-  </feed>"""
+MOCK_INDEX_HTML = """\
+<html><body>
+<table><tr><td>1</td><td>EX-99.1</td><td><a href="/Archives/edgar/data/1045810/pr.htm">pr.htm</a></td></tr></table>
+</body></html>"""
 
 MOCK_PRESS_RELEASE = """\
 <html><body>
@@ -162,9 +91,9 @@ def _feedparser_result(has_entry: bool) -> MagicMock:
     entry = MagicMock()
     entry.title          = "NVIDIA 8-K (Earnings)"
     entry.link           = INDEX_URL
-    entry.updated_parsed = time.gmtime()  # current time — passes the 24 h recency check
+    entry.updated_parsed = time.gmtime()  # current time — passes the recency check
     entry.get = lambda key, default="": {
-        "items-desc":       "Item 2.02: Results of Operations and Financial Condition",
+        "items-desc":       ITEMS_DESC,
         "accession-number": PREDICTED_ACCESSION,
     }.get(key, default)
 
@@ -217,32 +146,16 @@ def _make_mock_client() -> MagicMock:
 
 
 # ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _section(title: str) -> None:
-    print(f"\n{'=' * 60}\n  {title}\n{'=' * 60}")
-
-
-# ---------------------------------------------------------------------------
 # Test
 # ---------------------------------------------------------------------------
 
-async def run() -> None:
-    _section("STEP 1 — Mock setup")
-    print("  RSS feed  : empty on poll #1, fresh 8-K (item 2.02) on poll #2")
-    print("  Poller    : HEAD always 404 — will not win the race")
-    print("  feedparser: patched to return controlled feed objects")
-
+async def test_rss_detection_pipeline():
     client = _make_mock_client()
     feedparser_responses = [
-        _feedparser_result(has_entry=False),   # first poll: no actionable entry
-        _feedparser_result(has_entry=True),    # second poll: 8-K with 2.02
+        _feedparser_result(has_entry=False),  # first poll: no actionable entry
+        _feedparser_result(has_entry=True),   # second poll: 8-K with 2.02
     ]
 
-    # ------------------------------------------------------------------
-    _section("STEP 2 — Race detectors (asyncio.wait FIRST_COMPLETED)")
-    # ------------------------------------------------------------------
     with (
         # Avoid real SEC API call for last accession number
         patch("ingestion.watcher.get_last_accession",
@@ -253,74 +166,35 @@ async def run() -> None:
         # Skip wait loops — both detectors run as fast as possible
         patch("asyncio.sleep", new=AsyncMock()),
     ):
-        t0 = time_mod.perf_counter()
-        result, source = await _detect_filing(COMPANY, client)
-        elapsed = time_mod.perf_counter() - t0
+        result, source = await _detect_filing(COMPANY, client, seen=set())
 
-    print(f"Race resolved in {elapsed:.3f}s")
-    print(f"Winning detector : {source}")
-    print("Filing metadata  :")
-    pprint(result)
+    assert source == "rss", f"Expected RSS to win, got {source!r}"
+    assert result.ticker == "NVDA", "ticker mismatch"
+    assert result.source == DetectorSource.RSS_POLLER, "source field wrong"
+    assert result.accession == PREDICTED_ACCESSION, "accession mismatch"
+    assert result.index_url == INDEX_URL, "index_url mismatch"
+    assert result.detected_at, "detected_at missing"
 
-    assert source == "rss",                       f"Expected RSS to win, got {source!r}"
-    assert result["ticker"] == "NVDA",            "ticker mismatch"
-    assert result["source"] == "sec_rss",         "source field wrong"
-    assert result["accession"] == PREDICTED_ACCESSION, "accession mismatch"
-    assert result["index_url"] == INDEX_URL,      "index_url mismatch"
-    assert "detected_at" in result,               "detected_at missing"
-    assert "pipelines" in result,                 "pipelines missing"
-    assert "earnings" in result["pipelines"], (
-        f"expected 'earnings' pipeline, got {result['pipelines']}"
-    )
-    print("\n[PASS] Detection assertions")
+    # DetectorResult itself carries no `pipelines` field — poll_company_once computes it
+    # internally (via classify_items) purely to decide whether to return a hit at all, then
+    # discards it. Verify the classification independently against the same items-desc the
+    # mock feed provided, rather than asserting on a field that doesn't exist on the result.
+    assert "earnings" in classify_items(ITEMS_DESC)
 
     # ------------------------------------------------------------------
-    _section("STEP 3 — Fetch filing document (EX-99.1 exhibit)")
+    # Fetch filing document (EX-99.1 exhibit)
     # ------------------------------------------------------------------
-    t0 = time_mod.perf_counter()
-    raw_text = await fetch_filing_document(result["index_url"], client)
-    elapsed = time_mod.perf_counter() - t0
-
+    raw_text = await fetch_filing_document(result.index_url, client)
     assert raw_text, "fetch_filing_document returned empty string"
-    print(f"Fetched in {elapsed:.3f}s  ({len(raw_text):,} chars)")
-    print(f"\nFirst 200 chars:\n{raw_text[:200]}")
-    print("\n[PASS] Document fetch")
 
     # ------------------------------------------------------------------
-    _section("STEP 4 — Normalize & split sections")
+    # Normalize & split sections
     # ------------------------------------------------------------------
     clean_text = normalize(raw_text, "html")
     assert clean_text, "normalize() returned empty string"
-    print(f"Clean text: {len(clean_text):,} chars")
-    print(f"\nFirst 300 chars:\n{clean_text[:300]}")
 
     sections = split_sections(clean_text)
-    assert "full" in sections,  "split_sections missing 'full' key"
-    assert sections["full"],    "'full' section is empty"
-
-    print("\nSections:")
-    for key, val in sections.items():
-        status = f"{len(val):,} chars" if val else "(empty)"
-        print(f"  {key:12s}: {status}")
-
+    assert "full" in sections, "split_sections missing 'full' key"
+    assert sections["full"], "'full' section is empty"
     assert sections["financials"], "financials section is empty — keyword matching may be broken"
-    assert sections["guidance"],   "guidance section is empty — keyword matching may be broken"
-    print("\n[PASS] Normalisation")
-
-    # ------------------------------------------------------------------
-    _section("STEP 5 — Summary  (AI workers NOT invoked)")
-    # ------------------------------------------------------------------
-    print(f"  Ticker      : {result['ticker']}")
-    print(f"  Source      : {source}")
-    print(f"  Accession   : {result['accession']}")
-    print(f"  Pipelines   : {result['pipelines']}")
-    print(f"  Detected at : {result['detected_at']}")
-    print(f"  Content     : {len(clean_text):,} chars cleaned  "
-          f"({len(sections['financials']):,} financials / "
-          f"{len(sections['guidance']):,} guidance)")
-    print()
-    print("All checks passed. RSS detection pipeline is healthy.")
-
-
-if __name__ == "__main__":
-    asyncio.run(run())
+    assert sections["guidance"], "guidance section is empty — keyword matching may be broken"
