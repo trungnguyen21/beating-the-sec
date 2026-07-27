@@ -33,3 +33,14 @@ CREATE TABLE IF NOT EXISTS alerts (
 
 CREATE INDEX IF NOT EXISTS idx_alerts_ticker_detected ON alerts(ticker, detected_at);
 CREATE INDEX IF NOT EXISTS idx_subscriptions_ticker   ON subscriptions(ticker);
+
+-- Daily-refreshed next-earnings-date snapshot, used by ingestion/rotation_scheduler.py's
+-- CalendarHotSet to decide which companies are "hot" today. Nullable earnings_date — a ticker
+-- with no known upcoming date just never enters the hot set, not an error.
+CREATE TABLE IF NOT EXISTS earnings_calendar (
+    ticker        TEXT PRIMARY KEY REFERENCES tickers(ticker) ON DELETE CASCADE,
+    earnings_date TEXT,
+    updated_at    TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_earnings_calendar_date ON earnings_calendar(earnings_date);

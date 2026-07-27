@@ -15,13 +15,15 @@ whatever `hot_set_provider.current_hot_companies()` returns.
 
 import asyncio
 import math
+import sqlite3
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Awaitable, Callable, Protocol
+from zoneinfo import ZoneInfo
 
 import httpx
 
-from config import DETECTION_BUDGET
+from config import DB_PATH, DETECTION_BUDGET
 from ingestion.sec_rss import poll_company_once
 from models.model_detectors import DetectorResult
 from utils.logger import get_logger
@@ -66,6 +68,78 @@ class CooldownAwareHotSet:
             c for c in self._base.current_hot_companies()
             if self._cooldown_until.get(c["ticker"], now) <= now
         ]
+
+
+ET = ZoneInfo("America/New_York")
+PREMARKET_START = time(6, 0)
+PREMARKET_END = time(9, 30)
+AFTERMARKET_START = time(16, 0)
+AFTERMARKET_END = time(18, 0)
+
+
+def _in_polling_window(now_et: datetime) -> bool:
+    t = now_et.time()
+    return (PREMARKET_START <= t <= PREMARKET_END) or (AFTERMARKET_START <= t <= AFTERMARKET_END)
+
+
+class CalendarHotSet:
+    """Real hot-set provider (docs/checklist.md Phase 6) — a company is "hot" only if it's
+    expected to report earnings today (exact date match, no ±1 day hedge — a wrong predicted
+    date is a full miss for that day, by design) AND the current ET time is inside the
+    premarket (~6:00-9:30) or aftermarket (~4:00-6:00pm) window. Outside those windows the hot
+    set is fully empty, even for companies confirmed reporting today — zero SEC requests
+    during midday/overnight is the actual point of this class, not a compromise.
+
+    `now_fn` is injectable so tests can simulate specific times without waiting on real
+    windows, matching the injectable-provider pattern established for FixedHotSet/on_detected.
+
+    `ticker_filter`, if given, restricts the calendar-driven result to just these tickers.
+    Without it, every company in the DB reporting earnings today is hot — including ones
+    nobody is actually subscribed to, which wastes SEC request budget on companies nobody
+    cares about. `run_watcher` passes its `watchlist` param here for exactly that reason.
+    """
+
+    def __init__(
+        self,
+        db_path: str = DB_PATH,
+        now_fn: Callable[[], datetime] = None,
+        ticker_filter: set[str] | None = None,
+    ):
+        self._db_path = db_path
+        self._now_fn = now_fn or (lambda: datetime.now(ET))
+        self._ticker_filter = ticker_filter
+        self._cached_date: date | None = None
+        self._cached_companies: list[dict] = []
+
+    def _query_hot_companies(self, today: date) -> list[dict]:
+        conn = sqlite3.connect(self._db_path)
+        try:
+            rows = conn.execute(
+                """SELECT ec.ticker, t.cik, t.title
+                   FROM earnings_calendar ec
+                   JOIN tickers t ON t.ticker = ec.ticker
+                   WHERE ec.earnings_date = ?""",
+                (today.isoformat(),),
+            ).fetchall()
+        finally:
+            conn.close()
+        companies = [{"ticker": r[0], "cik": r[1], "title": r[2]} for r in rows]
+        if self._ticker_filter is not None:
+            companies = [c for c in companies if c["ticker"] in self._ticker_filter]
+        return companies
+
+    def current_hot_companies(self) -> list[dict]:
+        now_et = self._now_fn()
+
+        if not _in_polling_window(now_et):
+            return []
+
+        today = now_et.date()
+        if today != self._cached_date:
+            self._cached_companies = self._query_hot_companies(today)
+            self._cached_date = today
+
+        return self._cached_companies
 
 
 def _sync_queue(queue: deque, current_hot: list[dict]) -> None:
