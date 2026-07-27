@@ -75,8 +75,7 @@ async def detect_via_rss(
     client: httpx.AsyncClient,
     seen: set[str],
     max_age_hours: float = 3.0,
-) -> dict:
-    """
+) -> DetectorResult:
     Poll the SEC RSS feed until a new actionable 8-K appears.
     Thin wrapper around poll_company_once for callers that want "poll this one company
     forever" behavior (e.g. local dev/testing without the rotation scheduler).
