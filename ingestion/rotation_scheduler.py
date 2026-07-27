@@ -131,12 +131,13 @@ async def run_rotation(
                     logger.error(f"Rotation poll failed for {company['ticker']}: {result}")
                     queue.append(company)  # treat like a miss, retry next tick
                 elif result:
-                    maybe_awaitable = on_detected(company, result)
-                    if maybe_awaitable is not None:
-                        await maybe_awaitable
-                    # NOT requeued — frees this slot for the rest of the hot set.
-                else:
-                    queue.append(company)  # goes to the back of the line for next tick
+                    try:
+                        maybe_awaitable = on_detected(company, result)
+                        if maybe_awaitable is not None:
+                            await maybe_awaitable
+                    except Exception as e:
+                        logger.error(f"Rotation on_detected failed for {company['ticker']}: {e}")
+                        queue.append(company)
 
         await asyncio.sleep(1)  # TODO(tick-drift): compensate for per-tick work time once
                                  # Phase 5 has real numbers to tune against.
