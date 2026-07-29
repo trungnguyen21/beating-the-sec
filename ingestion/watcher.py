@@ -108,12 +108,13 @@ async def run_watcher(watchlist: list, queue) -> None:
 
     Hot-set source is CalendarHotSet (docs/checklist.md Phase 6): a company is only hot if
     it's expected to report earnings today (per the daily db/refresh_calendar.py snapshot) AND
-    the current ET time is inside the premarket/aftermarket polling window — fully empty
-    otherwise, which is the whole point of this design (SEC request volume no longer scales
-    with watchlist size). `watchlist` is passed through as a ticker_filter so the calendar
-    doesn't waste budget polling companies nobody is actually subscribed to. CooldownAwareHotSet
-    still applies POST_FILING_COOLDOWN_HOURS on top so a company that just fired isn't
-    immediately re-synced back into rotation next tick.
+    the current ET time is within ±15min of that company's own estimated report time (Phase
+    6d) — or, if yfinance gave no usable time for it, inside the broader premarket/aftermarket
+    block as a fallback. Fully empty otherwise, which is the whole point of this design (SEC
+    request volume no longer scales with watchlist size). `watchlist` is passed through as a
+    ticker_filter so the calendar doesn't waste budget polling companies nobody is actually
+    subscribed to. CooldownAwareHotSet still applies POST_FILING_COOLDOWN_HOURS on top so a
+    company that just fired isn't immediately re-synced back into rotation next tick.
     """
     async with httpx.AsyncClient() as client:
         watchlist_tickers = {c["ticker"] for c in watchlist}
@@ -144,4 +145,5 @@ async def run_watcher(watchlist: list, queue) -> None:
             hot_set, client, on_detected,
             detection_budget=DETECTION_BUDGET,
             max_age_hours=MAX_FILING_AGE_HOURS,
+            describe_upcoming=base_hot_set.upcoming_companies,
         )

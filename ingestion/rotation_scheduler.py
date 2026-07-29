@@ -32,6 +32,8 @@ logger = get_logger(__name__)
 
 OnDetected = Callable[[dict, DetectorResult], Awaitable[None] | None]
 
+IDLE_HEARTBEAT_TICKS = 300  # ~5 minutes at the 1s/tick sleep below
+
 
 class HotSetProvider(Protocol):
     def current_hot_companies(self) -> list[dict]: ...
@@ -76,19 +78,51 @@ PREMARKET_END = time(9, 30)
 AFTERMARKET_START = time(16, 0)
 AFTERMARKET_END = time(18, 0)
 
+# Precise per-company window: poll only within this pad of the company's own estimated
+# report time (docs/checklist.md Phase 6d), rather than the whole premarket/aftermarket block.
+TIME_WINDOW_PAD = timedelta(minutes=15)
 
-def _in_polling_window(now_et: datetime) -> bool:
+# Cheap outer short-circuit so CalendarHotSet still costs ~zero outside trading hours: a
+# per-company ±15min window can fall outside the old 6:00-9:30/16:00-18:00 bounds (e.g. a
+# 06:00 ET reporter's window starts at 5:45), so this has to be more generous than those —
+# it only exists to skip the DB query overnight, not to gate which companies are hot.
+OUTER_SHORT_CIRCUIT_START = time(5, 0)
+OUTER_SHORT_CIRCUIT_END = time(19, 0)
+
+
+def _maybe_active_now(now_et: datetime) -> bool:
     t = now_et.time()
-    return (PREMARKET_START <= t <= PREMARKET_END) or (AFTERMARKET_START <= t <= AFTERMARKET_END)
+    return OUTER_SHORT_CIRCUIT_START <= t <= OUTER_SHORT_CIRCUIT_END
+
+
+def _in_company_window(now_et: datetime, earnings_time: str | None) -> bool:
+    """earnings_time is ET "HH:MM:SS" or None. With a time, hot only within ±TIME_WINDOW_PAD
+    of it. Without one (yfinance gave no usable time for this company), fall back to the
+    full premarket+aftermarket block — same safety net as before Phase 6d."""
+    if not earnings_time:
+        t = now_et.time()
+        return (PREMARKET_START <= t <= PREMARKET_END) or (AFTERMARKET_START <= t <= AFTERMARKET_END)
+    try:
+        target_time = datetime.strptime(earnings_time, "%H:%M:%S").time()
+    except ValueError:
+        logger.warning(f"Unparseable earnings_time {earnings_time!r} — falling back to session window")
+        t = now_et.time()
+        return (PREMARKET_START <= t <= PREMARKET_END) or (AFTERMARKET_START <= t <= AFTERMARKET_END)
+    target = now_et.replace(
+        hour=target_time.hour, minute=target_time.minute, second=target_time.second, microsecond=0
+    )
+    return abs(now_et - target) <= TIME_WINDOW_PAD
 
 
 class CalendarHotSet:
     """Real hot-set provider (docs/checklist.md Phase 6) — a company is "hot" only if it's
     expected to report earnings today (exact date match, no ±1 day hedge — a wrong predicted
-    date is a full miss for that day, by design) AND the current ET time is inside the
-    premarket (~6:00-9:30) or aftermarket (~4:00-6:00pm) window. Outside those windows the hot
-    set is fully empty, even for companies confirmed reporting today — zero SEC requests
-    during midday/overnight is the actual point of this class, not a compromise.
+    date is a full miss for that day, by design) AND the current ET time is within
+    ±TIME_WINDOW_PAD of its own estimated report time (Phase 6d) — or, if no report time is
+    known, within the broader premarket (~6:00-9:30) or aftermarket (~4:00-6:00pm) block.
+    Outside those windows the hot set is fully empty, even for companies confirmed reporting
+    today — zero SEC requests during midday/overnight is the actual point of this class, not
+    a compromise.
 
     `now_fn` is injectable so tests can simulate specific times without waiting on real
     windows, matching the injectable-provider pattern established for FixedHotSet/on_detected.
@@ -115,7 +149,7 @@ class CalendarHotSet:
         conn = sqlite3.connect(self._db_path)
         try:
             rows = conn.execute(
-                """SELECT ec.ticker, t.cik, t.title
+                """SELECT ec.ticker, t.cik, t.title, ec.earnings_time
                    FROM earnings_calendar ec
                    JOIN tickers t ON t.ticker = ec.ticker
                    WHERE ec.earnings_date = ?""",
@@ -123,7 +157,7 @@ class CalendarHotSet:
             ).fetchall()
         finally:
             conn.close()
-        companies = [{"ticker": r[0], "cik": r[1], "title": r[2]} for r in rows]
+        companies = [{"ticker": r[0], "cik": r[1], "title": r[2], "earnings_time": r[3]} for r in rows]
         if self._ticker_filter is not None:
             companies = [c for c in companies if c["ticker"] in self._ticker_filter]
         return companies
@@ -131,7 +165,7 @@ class CalendarHotSet:
     def current_hot_companies(self) -> list[dict]:
         now_et = self._now_fn()
 
-        if not _in_polling_window(now_et):
+        if not _maybe_active_now(now_et):
             return []
 
         today = now_et.date()
@@ -139,7 +173,45 @@ class CalendarHotSet:
             self._cached_companies = self._query_hot_companies(today)
             self._cached_date = today
 
-        return self._cached_companies
+        return [c for c in self._cached_companies if _in_company_window(now_et, c["earnings_time"])]
+
+    def upcoming_companies(self, hours: float = 24) -> list[dict]:
+        """Companies expected to report within the next `hours` — for display/observability
+        only, not used for actual polling decisions (that's current_hot_companies above).
+        Ignores ticker cooldown state on purpose: this shows what the calendar has coming up,
+        not real-time poll eligibility. Unknown earnings_time falls back to the start of the
+        premarket window for ordering/display purposes, flagged via "time_known": False."""
+        now_et = self._now_fn()
+        horizon = now_et + timedelta(hours=hours)
+        dates = sorted({now_et.date(), horizon.date()})
+
+        conn = sqlite3.connect(self._db_path)
+        try:
+            placeholders = ",".join("?" * len(dates))
+            rows = conn.execute(
+                f"""SELECT ec.ticker, t.title, ec.earnings_date, ec.earnings_time
+                    FROM earnings_calendar ec
+                    JOIN tickers t ON t.ticker = ec.ticker
+                    WHERE ec.earnings_date IN ({placeholders})""",
+                tuple(d.isoformat() for d in dates),
+            ).fetchall()
+        finally:
+            conn.close()
+
+        upcoming = []
+        for ticker, title, date_str, time_str in rows:
+            if self._ticker_filter is not None and ticker not in self._ticker_filter:
+                continue
+            d = date.fromisoformat(date_str)
+            t = datetime.strptime(time_str, "%H:%M:%S").time() if time_str else PREMARKET_START
+            target = datetime.combine(d, t, tzinfo=ET)
+            if now_et <= target <= horizon:
+                upcoming.append({
+                    "ticker": ticker, "title": title, "target": target, "time_known": bool(time_str),
+                })
+
+        upcoming.sort(key=lambda c: c["target"])
+        return upcoming
 
 
 def _sync_queue(queue: deque, current_hot: list[dict]) -> None:
@@ -159,12 +231,28 @@ def _sync_queue(queue: deque, current_hot: list[dict]) -> None:
             queue.append(company)
 
 
+def _format_upcoming(companies: list[dict]) -> str:
+    now_et = datetime.now(ET)
+    lines = []
+    for c in companies:
+        delta = c["target"] - now_et
+        total_minutes = max(int(delta.total_seconds() // 60), 0)
+        h, m = divmod(total_minutes, 60)
+        time_note = "" if c["time_known"] else " (time unknown, estimated)"
+        lines.append(
+            f"  {c['ticker']:<6} {c['target'].strftime('%Y-%m-%d %H:%M')} ET "
+            f"(in {h}h{m:02d}m){time_note} — {c['title']}"
+        )
+    return "\n".join(lines)
+
+
 async def run_rotation(
     hot_set_provider: HotSetProvider,
     client: httpx.AsyncClient,
     on_detected: OnDetected,
     detection_budget: int = DETECTION_BUDGET,
     max_age_hours: float = 3.0,
+    describe_upcoming: Callable[[], list[dict]] | None = None,
 ) -> None:
     """
     Runs forever. Each tick:
@@ -173,20 +261,49 @@ async def run_rotation(
       3. A detected company is handed to `on_detected` and NOT requeued (frees its slot).
       4. A miss or a per-company failure is requeued for the next tick — one company's
          failure never blocks or cancels the rest of the batch.
+
+    `describe_upcoming`, if given (typically CalendarHotSet.upcoming_companies), is logged
+    once at startup and again on every idle heartbeat — display/observability only, doesn't
+    affect polling.
     """
     queue: deque = deque(hot_set_provider.current_hot_companies())
     if detection_budget <= 0:
         raise ValueError("detection_budget must be >= 1")
     seen_map: dict[str, set[str]] = {}
+    idle_ticks = 0
+
+    def _log_upcoming() -> None:
+        if describe_upcoming is None:
+            return
+        upcoming = describe_upcoming()
+        if upcoming:
+            logger.info(
+                f"📅 {len(upcoming)} compan{'y' if len(upcoming) == 1 else 'ies'} "
+                f"expected to report in the next 24h:\n{_format_upcoming(upcoming)}"
+            )
+        else:
+            logger.info("📅 No companies expected to report in the next 24h")
+
+    _log_upcoming()
+
     while True:
         _sync_queue(queue, hot_set_provider.current_hot_companies())
 
         if queue:
+            idle_ticks = 0
             worst_case_seconds = math.ceil(len(queue) / detection_budget)
             logger.info(
                 f"Rotation: {len(queue)} hot company(ies), budget={detection_budget}/s, "
                 f"worst-case detection lag ~{worst_case_seconds}s"
             )
+        else:
+            # Empty queue is the normal state most of the day (docs/checklist.md Phase 6) —
+            # but total silence for hours looks indistinguishable from a hung process. Log a
+            # throttled heartbeat instead of nothing.
+            idle_ticks += 1
+            if idle_ticks % IDLE_HEARTBEAT_TICKS == 1:
+                logger.info("Rotation: idle, no hot companies right now — waiting for next window")
+                _log_upcoming()
 
         batch = [queue.popleft() for _ in range(min(detection_budget, len(queue)))]
 

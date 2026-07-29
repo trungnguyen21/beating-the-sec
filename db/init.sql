@@ -40,6 +40,7 @@ CREATE INDEX IF NOT EXISTS idx_subscriptions_ticker   ON subscriptions(ticker);
 CREATE TABLE IF NOT EXISTS earnings_calendar (
     ticker        TEXT PRIMARY KEY REFERENCES tickers(ticker) ON DELETE CASCADE,
     earnings_date TEXT,
+    earnings_time TEXT,  -- ET "HH:MM:SS", NULL if yfinance gave no usable time
     updated_at    TEXT NOT NULL
 );
 
