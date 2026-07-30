@@ -320,7 +320,7 @@ async def run_rotation(
 
             for company, result in zip(batch, results):
                 if isinstance(result, Exception):
-                    logger.error(f"Rotation poll failed for {company['ticker']}: {result}")
+                    logger.error(f"Rotation poll failed for {company['ticker']}")
                     queue.append(company)  # treat like a miss, retry next tick
                 elif result:
                     try:
