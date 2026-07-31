@@ -33,6 +33,7 @@ async def poll_company_once(
     )
 
     r = await client.get(rss_url, headers=HEADERS, timeout=10)
+    logger.debug(f"Poll from {ticker}: {rss_url}")
     r.raise_for_status()
     feed = feedparser.parse(r.text)
     for entry in feed.entries[:1]:

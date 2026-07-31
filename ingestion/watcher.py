@@ -6,7 +6,7 @@ from utils.logger import get_logger
 from ingestion.edgar_poller import get_last_accession, next_accession, poll_for_filing, fetch_filing_document
 from ingestion.sec_rss import detect_via_rss
 from ingestion.estimates import fetch_estimates
-from ingestion.rotation_scheduler import FixedHotSet, CooldownAwareHotSet, run_rotation
+from ingestion.rotation_scheduler import CalendarHotSet, CooldownAwareHotSet, run_rotation
 from models.model_detectors import DetectorResult
 from config import MAX_FILING_AGE_HOURS, POST_FILING_COOLDOWN_HOURS, DETECTION_BUDGET
 
@@ -106,14 +106,19 @@ async def run_watcher(watchlist: list, queue) -> None:
     path. Kept in the codebase for a future, more robust per-filer approach — not deleted,
     just not called.
 
-    Hot-set source is currently a stub — FixedHotSet treats the entire watchlist as always
-    hot, since calendar-based gating (Phase 6) hasn't been built yet. CooldownAwareHotSet
-    still applies POST_FILING_COOLDOWN_HOURS on top of the stub so a company that just fired
-    isn't immediately re-polled next tick, preserving watch_company's original cooldown
-    behavior even without real calendar gating.
+    Hot-set source is CalendarHotSet (docs/checklist.md Phase 6): a company is only hot if
+    it's expected to report earnings today (per the daily db/refresh_calendar.py snapshot) AND
+    the current ET time is within ±15min of that company's own estimated report time (Phase
+    6d) — or, if yfinance gave no usable time for it, inside the broader premarket/aftermarket
+    block as a fallback. Fully empty otherwise, which is the whole point of this design (SEC
+    request volume no longer scales with watchlist size). `watchlist` is passed through as a
+    ticker_filter so the calendar doesn't waste budget polling companies nobody is actually
+    subscribed to. CooldownAwareHotSet still applies POST_FILING_COOLDOWN_HOURS on top so a
+    company that just fired isn't immediately re-synced back into rotation next tick.
     """
     async with httpx.AsyncClient() as client:
-        base_hot_set = FixedHotSet(watchlist)
+        watchlist_tickers = {c["ticker"] for c in watchlist}
+        base_hot_set = CalendarHotSet(ticker_filter=watchlist_tickers)
         hot_set = CooldownAwareHotSet(base_hot_set, POST_FILING_COOLDOWN_HOURS)
 
         async def on_detected(company: dict, result: DetectorResult) -> None:
@@ -140,4 +145,5 @@ async def run_watcher(watchlist: list, queue) -> None:
             hot_set, client, on_detected,
             detection_budget=DETECTION_BUDGET,
             max_age_hours=MAX_FILING_AGE_HOURS,
+            describe_upcoming=base_hot_set.upcoming_companies,
         )

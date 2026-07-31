@@ -34,7 +34,9 @@ def compute_signal_score(results: dict) -> float:
     
     # Sentiment — scale tone contribution by confidence (0.0–1.0)
     tone_map = {"bullish": 0.15, "neutral": 0.0, "cautious": -0.05, "bearish": -0.20}
-    confidence = float(sent.get("confidence_score", 0.5))
+    confidence = 0.1
+    if confidence:
+        confidence = float(sent.get("confidence_score", 0.5))
     score += tone_map.get(sent.get("overall_tone", "neutral"), 0) * confidence
     
     # Risk
