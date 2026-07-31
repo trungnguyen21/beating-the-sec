@@ -1,7 +1,6 @@
 # main.py
 import argparse
 import asyncio
-import json
 import traceback
 from ingestion.watcher import run_watcher
 from ingestion.deduplicator import Deduplicator
@@ -11,36 +10,17 @@ from pipeline.normalizer import normalize, split_sections
 from pipeline.dispatcher import analyze_filing
 from aggregator.aggregator import build_alert
 from workers.client import AIClient, GeminiClient
-from delivery.router import SubscriptionRouter
-from utils.load_user import UserConfig
+from delivery.router import SQLiteSubscriptionRouter
+from server.db import get_all_tickers
 from config import CONSUMER_CONCURRENCY
 
 from dotenv import load_dotenv
 load_dotenv()
 
 
-def _build_subscription_map(user_config: UserConfig) -> dict:
-    subscription_map: dict = {}
-    for user in user_config.get_users():
-        for company in (user.watchlist or []):
-            subscription_map.setdefault(company.ticker, []).append(user)
-    return subscription_map
-
-
-def _build_unified_watchlist(user_config: UserConfig) -> list:
-    seen: set[str] = set()
-    watchlist = []
-    for user in user_config.get_users():
-        for company in (user.watchlist or []):
-            if company.ticker not in seen:
-                seen.add(company.ticker)
-                watchlist.append({"ticker": company.ticker, "cik": company.cik})
-    return watchlist
-
-
 async def _process_one(msg_id: str, filing, queue: FilingQueue,
                         deduplicator: Deduplicator, ai_client: AIClient,
-                        router: SubscriptionRouter) -> None:
+                        router: SQLiteSubscriptionRouter) -> None:
     try:
         print(f"📥 Processing: {filing.ticker} {filing.accession}")
 
@@ -77,7 +57,7 @@ async def _process_one(msg_id: str, filing, queue: FilingQueue,
 
 
 async def process_filings(queue: FilingQueue, deduplicator: Deduplicator,
-                          ai_client: AIClient, router: SubscriptionRouter) -> None:
+                          ai_client: AIClient, router: SQLiteSubscriptionRouter) -> None:
     """
     Consumer loop: dispatch each filing as an independent task so multiple filings
     (e.g. simultaneous earnings) are analyzed concurrently instead of serially.
@@ -91,16 +71,6 @@ async def process_filings(queue: FilingQueue, deduplicator: Deduplicator,
 
     async for msg_id, filing in queue.consume():
         asyncio.create_task(bounded(msg_id, filing))
-
-
-def _load_all_tickers(watchlist_path: str) -> list:
-    """Load every ticker from watchlist.json — used by the ingestion stage."""
-    with open(watchlist_path) as f:
-        raw = json.load(f)
-    return [
-        {"ticker": item["ticker"], "cik": str(int(item["cik"])).zfill(10)}
-        for item in raw
-    ]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -121,9 +91,9 @@ async def main():
     args = _parse_args()
 
     if args.stage == "ingestion":
-        # Watch every ticker in watchlist.json — subscribers are managed in the DB,
-        # not the watchlist, so we poll everything and let the delivery consumer filter.
-        watchlist = _load_all_tickers("watchlist.json")
+        # Watch every ticker in the SQLite tickers table — subscribers are managed
+        # separately in the DB, so we poll everything and let the delivery consumer filter.
+        watchlist = await get_all_tickers()
         async with KafkaFilingQueue() as queue:
             await run_watcher(watchlist, queue)
 
@@ -141,18 +111,18 @@ async def main():
         await uvicorn.Server(config).serve()
 
     else:
-        # Dev mode: single-process, in-memory queue, reads users.json for delivery routing.
-        user_config = UserConfig()
-        user_config.load_configs("watchlist.json", "users.json")
-        subscription_map = _build_subscription_map(user_config)
-        unified_watchlist = _build_unified_watchlist(user_config)
-        router = SubscriptionRouter(subscription_map)
+        # Dev mode: single-process, in-memory queue, SQLite for both the ticker list
+        # (tickers table) and delivery routing (subscriptions table) — same source of
+        # truth as the multi-stage production path, just collapsed into one process.
+        watchlist = await get_all_tickers()
+        print(f"🚀 Starting dev mode — {len(watchlist)} ticker(s) loaded from SQLite")
+        router = SQLiteSubscriptionRouter()
 
         queue = InMemoryFilingQueue()
         deduplicator = Deduplicator()
         async with GeminiClient() as ai_client:
             await asyncio.gather(
-                run_watcher(unified_watchlist, queue),
+                run_watcher(watchlist, queue),
                 process_filings(queue, deduplicator, ai_client, router),
             )
 
