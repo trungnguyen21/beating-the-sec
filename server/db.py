@@ -8,8 +8,23 @@ from config import DB_PATH
 
 
 async def get_all_tickers() -> list[dict]:
+    """Every ticker, active or not — used by the subscribe UI, which needs to offer the full
+    universe of tickers regardless of current polling status."""
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute("SELECT ticker, title FROM tickers ORDER BY ticker") as cur:
+            rows = await cur.fetchall()
+    return [{"ticker": r[0], "title": r[1]} for r in rows]
+
+
+async def get_active_tickers() -> list[dict]:
+    """Only tickers with is_active = 1 — the actual polling watchlist. A ticker becomes active
+    when it gets its first subscriber (upsert_user_subscriptions) and inactive again once its
+    last subscriber unsubscribes (delete_subscriptions_by_webhook) — this keeps SEC/yfinance
+    request volume tied to real demand instead of the full ~500-ticker calendar universe."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT ticker, title FROM tickers WHERE is_active = 1 ORDER BY ticker"
+        ) as cur:
             rows = await cur.fetchall()
     return [{"ticker": r[0], "title": r[1]} for r in rows]
 
@@ -40,14 +55,44 @@ async def upsert_user_subscriptions(name: str, webhook_url: str, tickers: list[s
         user_id = row[0]
 
         # Replace subscriptions for this user
+        async with db.execute(
+            "SELECT ticker FROM subscriptions WHERE user_id = ?", (user_id,)
+        ) as cur:
+            previous_tickers = [r[0] for r in await cur.fetchall()]
+
         await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (user_id,))
         await db.executemany(
             "INSERT OR IGNORE INTO subscriptions (user_id, ticker, subscribed_at) VALUES (?, ?, ?)",
             [(user_id, t, now) for t in tickers],
         )
+
+        # A subscribed ticker must be pollable — flip it active regardless of its prior state.
+        await db.executemany(
+            "UPDATE tickers SET is_active = 1 WHERE ticker = ?",
+            [(t,) for t in tickers],
+        )
+        # A ticker this user dropped, with no other subscriber left, stops being pollable.
+        dropped = set(previous_tickers) - set(tickers)
+        await _deactivate_orphaned_tickers(db, dropped)
+
         await db.commit()
 
     return user_id
+
+
+async def _deactivate_orphaned_tickers(db: aiosqlite.Connection, candidates: set[str]) -> None:
+    """For each candidate ticker, set is_active = 0 if no subscription references it anymore.
+    Called with the tickers a change *might* have orphaned — not every ticker in the DB — so
+    callers must pass only the ones actually affected by their delete/replace."""
+    if not candidates:
+        return
+    placeholders = ",".join("?" * len(candidates))
+    await db.execute(
+        f"""UPDATE tickers SET is_active = 0
+            WHERE ticker IN ({placeholders})
+              AND ticker NOT IN (SELECT ticker FROM subscriptions)""",
+        tuple(candidates),
+    )
 
 
 async def delete_subscriptions_by_webhook(webhook_url: str) -> bool:
@@ -60,7 +105,15 @@ async def delete_subscriptions_by_webhook(webhook_url: str) -> bool:
             row = await cur.fetchone()
         if not row:
             return False
-        await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (row[0],))
+        user_id = row[0]
+
+        async with db.execute(
+            "SELECT ticker FROM subscriptions WHERE user_id = ?", (user_id,)
+        ) as cur:
+            affected = {r[0] for r in await cur.fetchall()}
+
+        await db.execute("DELETE FROM subscriptions WHERE user_id = ?", (user_id,))
+        await _deactivate_orphaned_tickers(db, affected)
         await db.commit()
     return True
 

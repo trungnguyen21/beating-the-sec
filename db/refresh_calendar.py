@@ -25,6 +25,7 @@ import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+from db.schema import ensure_schema
 from ingestion.estimates import fetch_next_earnings_datetime, ticker_exists
 from utils.logger import get_logger
 
@@ -37,19 +38,6 @@ def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--db", default=str(ROOT / "bsec.db"))
     return p.parse_args()
-
-
-def _ensure_schema(db_path: str) -> None:
-    schema = (ROOT / "db" / "init.sql").read_text()
-    conn = sqlite3.connect(db_path)
-    conn.executescript(schema)
-    # CREATE TABLE IF NOT EXISTS is a no-op on an already-existing earnings_calendar table
-    # (e.g. from before earnings_time was added) — migrate it explicitly.
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(earnings_calendar)")}
-    if "earnings_time" not in columns:
-        conn.execute("ALTER TABLE earnings_calendar ADD COLUMN earnings_time TEXT")
-    conn.commit()
-    conn.close()
 
 
 def _load_tickers(db_path: str) -> list[str]:
@@ -85,7 +73,7 @@ def _upsert_calendar(db_path: str, results: dict[str, tuple[str | None, str | No
 
 
 async def refresh(db_path: str) -> None:
-    _ensure_schema(db_path)
+    ensure_schema(db_path)
     tickers = _load_tickers(db_path)
     logger.info(f"Refreshing earnings calendar for {len(tickers)} ticker(s) — sequential, this will take a while")
 

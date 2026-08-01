@@ -7,6 +7,7 @@ import httpx
 from typing import Protocol
 
 from utils.logger import get_logger
+from utils.time_format import format_display
 
 logger = get_logger(__name__)
 
@@ -77,13 +78,19 @@ class DiscordWebhook:
                 "inline": False,
             })
 
+        footer_text = (
+            f"Filed: {format_display(alert.get('filed_at'))}  |  "
+            f"Detected: {format_display(alert.get('detected_at'))}  |  "
+            f"Alerted: {format_display(alert.get('alerted_at'))}"
+        )
+
         return {
             "embeds": [{
                 "title": f"{ticker} — Earnings Alert",
                 "description": alert.get("headline", ""),
                 "color": color,
                 "fields": fields,
-                "footer": {"text": f"Detected: {alert['detected_at']}  |  Alerted: {alert['alerted_at']}"},
+                "footer": {"text": footer_text},
             }]
         }
 
