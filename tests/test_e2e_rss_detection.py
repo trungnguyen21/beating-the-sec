@@ -12,7 +12,7 @@ Stops before AI analysis — no API key required.
 """
 
 import asyncio
-import time
+from datetime import datetime, timezone
 
 import pytest
 from dotenv import load_dotenv
@@ -89,12 +89,13 @@ def _feedparser_result(has_entry: bool) -> MagicMock:
         return feed
 
     entry = MagicMock()
-    entry.title          = "NVIDIA 8-K (Earnings)"
-    entry.link           = INDEX_URL
-    entry.updated_parsed = time.gmtime()  # current time — passes the recency check
+    entry.title = "NVIDIA 8-K (Earnings)"
+    entry.link  = INDEX_URL
+    entry.date  = datetime.now(timezone.utc).isoformat()  # current time — passes the recency check
     entry.get = lambda key, default="": {
         "items-desc":       ITEMS_DESC,
         "accession-number": PREDICTED_ACCESSION,
+        "date":             entry.date,
     }.get(key, default)
 
     feed.entries = [entry]

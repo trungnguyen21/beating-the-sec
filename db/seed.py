@@ -9,6 +9,8 @@ import json
 import sqlite3
 from pathlib import Path
 
+from db.schema import ensure_schema
+
 ROOT = Path(__file__).parent.parent
 
 
@@ -22,12 +24,11 @@ def _parse_args() -> argparse.Namespace:
 def main() -> None:
     args = _parse_args()
 
-    schema = (ROOT / "db" / "init.sql").read_text()
     with open(args.watchlist) as f:
         companies = json.load(f)
 
+    ensure_schema(args.db)
     conn = sqlite3.connect(args.db)
-    conn.executescript(schema)
 
     rows = [
         (

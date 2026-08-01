@@ -1,6 +1,8 @@
 # aggregator/aggregator.py
 from datetime import datetime, timezone
 
+from utils.time_format import parse_timestamp
+
 def compute_signal_score(results: dict) -> float:
     """
     Simple signal score: 0.0 (very bearish) to 1.0 (very bullish).
@@ -49,16 +51,25 @@ def compute_signal_score(results: dict) -> float:
     
     return round(max(0.0, min(1.0, score)), 2)
 
-def build_alert(ticker: str, results: dict, detected_at: str) -> dict:
+def build_alert(ticker: str, results: dict, detected_at: str, filed_at: str | datetime | None = None) -> dict:
     score = compute_signal_score(results)
     ext = results.get("extraction", {})
     sent = results.get("sentiment", {})
     risk = results.get("risk", {})
-    
+
+    filed_dt = parse_timestamp(filed_at)
+    detected_dt = parse_timestamp(detected_at)
+    feed_to_detection_seconds = (
+        round((detected_dt - filed_dt).total_seconds(), 3)
+        if filed_dt and detected_dt else None
+    )
+
     return {
         "ticker": ticker,
-        "detected_at": detected_at,
+        "filed_at": filed_dt.isoformat() if filed_dt else None,
+        "detected_at": detected_dt.isoformat() if detected_dt else detected_at,
         "alerted_at": datetime.now(timezone.utc).isoformat(),
+        "feed_to_detection_seconds": feed_to_detection_seconds,
         "signal_score": score,
         "signal_label": "🟢 Bullish" if score >= 0.65 else "🔴 Bearish" if score < 0.40 else "🟡 Neutral",
         "headline": sent.get("headline_signal", ""),
