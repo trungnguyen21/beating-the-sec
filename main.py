@@ -11,7 +11,7 @@ from pipeline.dispatcher import analyze_filing
 from aggregator.aggregator import build_alert
 from workers.client import AIClient, GeminiClient
 from delivery.router import SQLiteSubscriptionRouter
-from server.db import get_all_tickers
+from server.db import get_active_tickers
 from config import CONSUMER_CONCURRENCY
 
 from dotenv import load_dotenv
@@ -43,6 +43,7 @@ async def _process_one(msg_id: str, filing, queue: FilingQueue,
             ticker=filing.ticker,
             results=results,
             detected_at=filing.detected_at,
+            filed_at=filing.filed_at,
         )
 
         print(f"🚨 Alert: {alert['signal_label']} — {alert['ticker']}")
@@ -91,9 +92,10 @@ async def main():
     args = _parse_args()
 
     if args.stage == "ingestion":
-        # Watch every ticker in the SQLite tickers table — subscribers are managed
-        # separately in the DB, so we poll everything and let the delivery consumer filter.
-        watchlist = await get_all_tickers()
+        # Only poll tickers with is_active = 1 (i.e. at least one subscriber) — see
+        # server/db.py's get_active_tickers/upsert_user_subscriptions for how that flag is kept
+        # in sync with the subscriptions table.
+        watchlist = await get_active_tickers()
         async with KafkaFilingQueue() as queue:
             await run_watcher(watchlist, queue)
 
@@ -112,10 +114,11 @@ async def main():
 
     else:
         # Dev mode: single-process, in-memory queue, SQLite for both the ticker list
-        # (tickers table) and delivery routing (subscriptions table) — same source of
-        # truth as the multi-stage production path, just collapsed into one process.
-        watchlist = await get_all_tickers()
-        print(f"🚀 Starting dev mode — {len(watchlist)} ticker(s) loaded from SQLite")
+        # (tickers table, filtered to is_active) and delivery routing (subscriptions table) —
+        # same source of truth as the multi-stage production path, just collapsed into one
+        # process.
+        watchlist = await get_active_tickers()
+        print(f"🚀 Starting dev mode — {len(watchlist)} active ticker(s) loaded from SQLite")
         router = SQLiteSubscriptionRouter()
 
         queue = InMemoryFilingQueue()
