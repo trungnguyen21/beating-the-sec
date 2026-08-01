@@ -67,7 +67,7 @@ def build_alert(ticker: str, results: dict, detected_at: str, filed_at: str | da
     return {
         "ticker": ticker,
         "filed_at": filed_dt.isoformat() if filed_dt else None,
-        "detected_at": detected_at,
+        "detected_at": detected_dt.isoformat() if detected_dt else detected_at,
         "alerted_at": datetime.now(timezone.utc).isoformat(),
         "feed_to_detection_seconds": feed_to_detection_seconds,
         "signal_score": score,
