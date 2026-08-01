@@ -27,6 +27,7 @@ class KafkaFilingQueue:
             "accession": filing.accession,
             "index_url": filing.index_url,
             "detected_at": filing.detected_at,
+            "filed_at": filing.filed_at.isoformat() if filing.filed_at else None,
         }
         await self._producer.send(KAFKA_RAW_TOPIC, json.dumps(payload).encode())
     async def ack(self, _msg_id: str) -> None:
