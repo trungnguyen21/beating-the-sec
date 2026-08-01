@@ -36,6 +36,7 @@ class KafkaFilingQueue:
             "accession": filing.accession,
             "index_url": filing.index_url,
             "detected_at": filing.detected_at,
+            "filed_at": filing.filed_at.isoformat() if filing.filed_at else None,
         }
         await self._producer.send(KAFKA_RAW_TOPIC, json.dumps(payload).encode())
         logger.info(f"→ Kafka: {filing.ticker} enqueued to {KAFKA_RAW_TOPIC}")
@@ -79,7 +80,9 @@ async def run_ai_worker(worker_id: str):
 
                         sections = split_sections(clean_text)
                         results = await analyze_filing(sections, ai_client, estimates)
-                        alert = build_alert(filing["ticker"], results, filing["detected_at"])
+                        alert = build_alert(
+                            filing["ticker"], results, filing["detected_at"], filing.get("filed_at")
+                        )
 
                         await save_alert(filing["ticker"], alert)
                         await producer.send(KAFKA_RESULTS_TOPIC, json.dumps(alert).encode())

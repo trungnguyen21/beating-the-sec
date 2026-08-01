@@ -1,5 +1,4 @@
 import asyncio
-import calendar
 import hashlib
 import httpx
 import feedparser
@@ -43,10 +42,8 @@ async def poll_company_once(
             continue
 
         filed_at = None
-        if hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-            filed_at = datetime.fromtimestamp(
-                calendar.timegm(entry.updated_parsed), tz=timezone.utc
-            )
+        if entry.get('date'):
+            filed_at = datetime.fromisoformat(entry.date)
             age = datetime.now(timezone.utc) - filed_at
             if age > timedelta(hours=max_age_hours):
                 logger.debug(f"RSS: {ticker} — entry {age} old, skipping")
@@ -124,11 +121,8 @@ async def monitor_nasdaq_rss(company: dict, queue, seen: set):
 
                     # Check recency (skip filings older than 24 hours)
                     is_new = True
-                    if hasattr(entry, 'updated_parsed') and entry.updated_parsed:
-                        import calendar
-                        from datetime import timedelta
-                        timestamp = calendar.timegm(entry.updated_parsed)
-                        entry_date = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+                    if entry.get('date'):
+                        entry_date = datetime.fromisoformat(entry.date)
                         if datetime.now(timezone.utc) - entry_date > timedelta(hours=24):
                             is_new = False
 
