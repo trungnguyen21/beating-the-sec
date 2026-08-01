@@ -43,11 +43,7 @@ async def poll_company_once(
 
         filed_at = None
         if entry.get('date'):
-            filed_at = datetime.fromisoformat(entry.date)
-            if filed_at.tzinfo is None:
-                filed_at = filed_at.replace(tzinfo=timezone.utc)
-            else:
-                filed_at = filed_at.astimezone(timezone.utc)
+            filed_at = datetime.fromisoformat(entry.date).astimezone(timezone.utc)
             age = datetime.now(timezone.utc) - filed_at
             if age > timedelta(hours=max_age_hours):
                 logger.debug(f"RSS: {ticker} — entry {age} old, skipping")
@@ -126,7 +122,7 @@ async def monitor_nasdaq_rss(company: dict, queue, seen: set):
                     # Check recency (skip filings older than 24 hours)
                     is_new = True
                     if entry.get('date'):
-                        entry_date = datetime.fromisoformat(entry.date)
+                        entry_date = datetime.fromisoformat(entry.date).astimezone(timezone.utc)
                         if datetime.now(timezone.utc) - entry_date > timedelta(hours=24):
                             is_new = False
 

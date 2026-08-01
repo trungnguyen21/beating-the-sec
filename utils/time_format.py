@@ -11,13 +11,16 @@ _DISPLAY_FORMAT = "%b %-d, %Y - %H:%M:%S"
 
 def parse_timestamp(value: str | datetime | None) -> datetime | None:
     """Parse an ISO-8601 string (or pass through a datetime) into a tz-aware
-    UTC-anchored datetime. Naive input is assumed to already be UTC."""
+    datetime normalized to UTC. Naive input is assumed to already be UTC;
+    offset-aware input (e.g. SEC's RSS feed, which reports ET) is converted —
+    every timestamp downstream (aggregator, DB, display) is stored/compared
+    consistently in UTC regardless of the source's original offset."""
     if value is None:
         return None
     dt = value if isinstance(value, datetime) else datetime.fromisoformat(value)
     if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def format_display(value: str | datetime | None) -> str:
