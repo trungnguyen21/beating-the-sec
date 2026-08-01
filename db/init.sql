@@ -2,9 +2,10 @@ PRAGMA foreign_keys = ON;
 PRAGMA journal_mode = WAL;
 
 CREATE TABLE IF NOT EXISTS tickers (
-    ticker TEXT PRIMARY KEY,
-    cik    TEXT NOT NULL,
-    title  TEXT NOT NULL
+    ticker    TEXT PRIMARY KEY,
+    cik       TEXT NOT NULL,
+    title     TEXT NOT NULL,
+    is_active INTEGER NOT NULL DEFAULT 0  -- only active tickers get polled; set by subscription
 );
 
 CREATE TABLE IF NOT EXISTS users (
