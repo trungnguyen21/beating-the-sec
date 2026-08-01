@@ -44,6 +44,10 @@ async def poll_company_once(
         filed_at = None
         if entry.get('date'):
             filed_at = datetime.fromisoformat(entry.date)
+            if filed_at.tzinfo is None:
+                filed_at = filed_at.replace(tzinfo=timezone.utc)
+            else:
+                filed_at = filed_at.astimezone(timezone.utc)
             age = datetime.now(timezone.utc) - filed_at
             if age > timedelta(hours=max_age_hours):
                 logger.debug(f"RSS: {ticker} — entry {age} old, skipping")
