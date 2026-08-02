@@ -1,0 +1,135 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BSEC Admin</title>
+  <style>
+    body { font-family: sans-serif; max-width: 900px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: .25rem; }
+    h2 { margin-top: 2.5rem; margin-bottom: .5rem; }
+    table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
+    th, td { border: 1px solid #ccc; padding: .4rem .6rem; text-align: left; font-size: .9rem; vertical-align: top; }
+    th { background: #eee; }
+    form { display: inline; }
+    input[type=text], input[type=url] { width: 100%; box-sizing: border-box; }
+    #ticker-search { width: 240px; margin-bottom: .5rem; }
+    fieldset { margin-top: .5rem; }
+    .tickers-box { max-height: 140px; overflow-y: auto; border: 1px solid #ccc; padding: .4rem; columns: 3; }
+    .tickers-box label { display: block; font-weight: normal; white-space: nowrap; }
+    button { cursor: pointer; }
+    .danger { color: #b00; }
+    details > summary { cursor: pointer; }
+    .scroll-table { max-height: 320px; overflow-y: auto; border: 1px solid #ccc; margin-bottom: 1rem; }
+    .scroll-table table { margin-bottom: 0; border: none; }
+    .scroll-table th { position: sticky; top: 0; }
+  </style>
+</head>
+<body>
+<h1>BSEC Admin</h1>
+
+<h2>Tickers</h2>
+<form method="post" action="/admin/tickers/bulk" style="margin-bottom:.5rem;">
+  <button type="submit" name="active" value="1">Activate all</button>
+  <button type="submit" name="active" value="0">Deactivate all</button>
+</form>
+<br />
+<input type="text" id="ticker-search" placeholder="Search tickers…" autocomplete="off" />
+<div class="scroll-table">
+<table id="ticker-table">
+  <tr><th>Ticker</th><th>Company Name</th><th>Active</th><th></th><th></th></tr>
+  {% for t in tickers %}
+  <tr>
+    <td>{{ t.ticker }}</td>
+    <td>{{ t.title }}</td>
+    <td>{{ "yes" if t.is_active else "no" }}</td>
+    <td>
+      <form method="post" action="/admin/tickers/toggle">
+        <input type="hidden" name="ticker" value="{{ t.ticker }}" />
+        <input type="hidden" name="active" value="{{ 0 if t.is_active else 1 }}" />
+        <button type="submit">{{ "Deactivate" if t.is_active else "Activate" }}</button>
+      </form>
+    </td>
+    <td>
+      <form method="post" action="/admin/tickers/{{ t.ticker }}/delete" onsubmit="return confirm('Delete {{ t.ticker }}? This also removes any subscriptions to it.');">
+        <button type="submit" class="danger">Delete</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+
+<h3>Add company</h3>
+<form method="post" action="/admin/tickers">
+  <label>Ticker<br /><input type="text" name="ticker" placeholder="AAPL" required /></label><br /><br />
+  <label>CIK<br /><input type="text" name="cik" placeholder="320193" required /></label><br /><br />
+  <label>Company name<br /><input type="text" name="title" placeholder="Apple Inc." required /></label><br /><br />
+  <button type="submit">Add ticker</button>
+</form>
+
+<h2>Users</h2>
+<table>
+  <tr><th>Name</th><th>Webhook URL</th><th>Tickers</th><th>Created</th><th>Actions</th></tr>
+  {% for u in users %}
+  <tr>
+    <td>{{ u.name }}</td>
+    <td style="max-width: 260px; overflow-wrap: anywhere;">{{ u.webhook_url }}</td>
+    <td>{{ u.tickers | join(", ") }}</td>
+    <td>{{ u.created_at }}</td>
+    <td>
+      <details>
+        <summary>Edit</summary>
+        <form method="post" action="/admin/users/{{ u.id }}">
+          <label>Name<br /><input type="text" name="name" value="{{ u.name }}" required /></label>
+          <label>Webhook URL<br /><input type="url" name="webhook_url" value="{{ u.webhook_url }}" required /></label>
+          <fieldset>
+            <legend>Tickers</legend>
+            <div class="tickers-box">
+              {% for t in tickers %}
+              <label>
+                <input type="checkbox" name="tickers" value="{{ t.ticker }}" {% if t.ticker in u.tickers %}checked{% endif %} />
+                {{ t.ticker }}
+              </label>
+              {% endfor %}
+            </div>
+          </fieldset>
+          <button type="submit">Save</button>
+        </form>
+      </details>
+      <form method="post" action="/admin/users/{{ u.id }}/delete" onsubmit="return confirm('Delete this user?');">
+        <button type="submit" class="danger">Delete</button>
+      </form>
+    </td>
+  </tr>
+  {% endfor %}
+</table>
+
+<h2>Create user</h2>
+<form method="post" action="/admin/users">
+  <label>Name<br /><input type="text" name="name" required /></label><br /><br />
+  <label>Webhook URL<br /><input type="url" name="webhook_url" required /></label>
+  <fieldset>
+    <legend>Tickers</legend>
+    <div class="tickers-box">
+      {% for t in tickers %}
+      <label><input type="checkbox" name="tickers" value="{{ t.ticker }}" /> {{ t.ticker }}</label>
+      {% endfor %}
+    </div>
+  </fieldset>
+  <button type="submit">Create</button>
+</form>
+
+<script>
+  const search = document.getElementById('ticker-search');
+  const rows = document.querySelectorAll('#ticker-table tr:not(:first-child)');
+  search.addEventListener('input', () => {
+    const q = search.value.toLowerCase();
+    rows.forEach(row => {
+      row.style.display = row.textContent.toLowerCase().includes(q) ? '' : 'none';
+    });
+  });
+</script>
+
+</body>
+</html>
