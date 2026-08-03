@@ -51,7 +51,8 @@ def compute_signal_score(results: dict) -> float:
     
     return round(max(0.0, min(1.0, score)), 2)
 
-def build_alert(ticker: str, results: dict, detected_at: str, filed_at: str | datetime | None = None) -> dict:
+def build_alert(ticker: str, results: dict, detected_at: str, filed_at: str | datetime | None = None,
+                 filing_url: str | None = None) -> dict:
     score = compute_signal_score(results)
     ext = results.get("extraction", {})
     sent = results.get("sentiment", {})
@@ -66,6 +67,7 @@ def build_alert(ticker: str, results: dict, detected_at: str, filed_at: str | da
 
     return {
         "ticker": ticker,
+        "filing_url": filing_url,
         "filed_at": filed_dt.isoformat() if filed_dt else None,
         "detected_at": detected_dt.isoformat() if detected_dt else detected_at,
         "alerted_at": datetime.now(timezone.utc).isoformat(),
