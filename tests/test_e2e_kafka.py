@@ -14,9 +14,9 @@ Real:
   - Gemini AI analysis
   - SQLite subscriber lookup (server/db.py) — the actual datastore run_delivery_consumer
     reads from in production, NOT data/users.json (that's a separate, legacy config path
-    used only by main.py's no-flag dev mode). The test seeds its own subscriber row directly
-    via upsert_user_subscriptions so it's self-contained and doesn't silently pass or hang
-    depending on whatever happens to already be in bsec.db.
+    used only by main.py's no-flag dev mode). The test seeds its own guild subscriber row
+    directly via upsert_guild_channel/add_guild_tickers so it's self-contained and doesn't
+    silently pass or hang depending on whatever happens to already be in bsec.db.
 
 Requires CONFLUENT_BOOTSTRAP / CONFLUENT_API_KEY / CONFLUENT_API_SECRET in .env, an active
 Confluent cluster, and raw_filings/filing_results topics created. Requires the ticker used
@@ -30,21 +30,20 @@ import os
 import time
 from unittest.mock import AsyncMock, patch
 
-import aiosqlite
 import pytest
 from dotenv import load_dotenv
 
 load_dotenv()
 
-from config import DB_PATH
 from pipeline.kafka_consumer import KafkaFilingQueue, run_ai_worker, run_delivery_consumer
 from delivery.webhook import DiscordWebhook
-from server.db import upsert_user_subscriptions, delete_subscriptions_by_webhook
+from server.db import add_guild_tickers, delete_user, upsert_guild_channel
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SAMPLE_HTML = os.path.join(REPO_ROOT, "data", "DELL.html")
 TIMEOUT = 120  # seconds — covers Kafka poll delay + AI analysis time
 TEST_WEBHOOK_URL = "https://example.com/test-e2e-kafka-webhook"  # never actually called — DiscordWebhook.send is patched
+TEST_GUILD_ID = "test-e2e-kafka-guild"  # fake Discord guild ID, not a real one
 
 
 class _FakeFiling:
@@ -62,9 +61,10 @@ async def test_e2e_kafka_pipeline():
     test_ticker = os.environ.get("SAMPLE_FILING_TICKER", "DELL").upper()
     html_path = os.environ.get("SAMPLE_FILING_PATH", SAMPLE_HTML)
 
-    # Seed a real subscriber row in the SQLite DB the delivery consumer actually reads from,
-    # rather than depending on whatever happens to already be there.
-    await upsert_user_subscriptions("test-e2e-kafka", TEST_WEBHOOK_URL, [test_ticker])
+    # Seed a real guild subscriber row in the SQLite DB the delivery consumer actually reads
+    # from, rather than depending on whatever happens to already be there.
+    await upsert_guild_channel(TEST_GUILD_ID, "test-e2e-kafka", TEST_WEBHOOK_URL)
+    await add_guild_tickers(TEST_GUILD_ID, [test_ticker])
 
     with open(html_path) as f:
         sample_html = f.read()
@@ -112,11 +112,5 @@ async def test_e2e_kafka_pipeline():
 
         assert delivery_event.is_set()
     finally:
-        # Don't leave the seeded test subscriber in the shared bsec.db.
-        # delete_subscriptions_by_webhook only clears the subscriptions row, not the user
-        # itself, so remove the user row directly rather than growing server/db.py's public
-        # API just for test cleanup.
-        await delete_subscriptions_by_webhook(TEST_WEBHOOK_URL)
-        async with aiosqlite.connect(DB_PATH) as db:
-            await db.execute("DELETE FROM users WHERE webhook_url = ?", (TEST_WEBHOOK_URL,))
-            await db.commit()
+        # Don't leave the seeded test guild in the shared bsec.db.
+        await delete_user(TEST_GUILD_ID)

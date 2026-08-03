@@ -11,8 +11,8 @@ from ingestion.edgar_poller import fetch_filing_document
 from ingestion.estimates import fetch_estimates
 from config import KAFKA_RAW_TOPIC, KAFKA_RESULTS_TOPIC, KAFKA_DLQ_TOPIC, KAFKA_AI_GROUP, KAFKA_DELIVERY_GROUP
 from workers.client import GeminiClient
-from delivery.webhook import DiscordWebhook
-from server.db import get_subscribers_for_ticker, save_alert
+from delivery.webhook import DiscordWebhook, WebhookGoneError
+from server.db import delete_user, get_subscribers_for_ticker, save_alert
 from utils.kafka import kafka_client_config
 from utils.logger import get_logger
 
@@ -125,6 +125,9 @@ async def run_delivery_consumer():
                 try:
                     await DiscordWebhook(sub["webhook_url"]).send(alert)
                     logger.info(f"  ✓ {sub['id']}")
+                except WebhookGoneError:
+                    logger.warning(f"  ✗ {sub['id']}: webhook gone — deactivating guild")
+                    await delete_user(sub["id"])
                 except Exception as e:
                     logger.error(f"  ✗ {sub['id']}: {e}")
 
