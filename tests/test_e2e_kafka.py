@@ -54,6 +54,7 @@ class _FakeFiling:
         self.accession = "test-0001"
         self.index_url = "https://example.com/fake-index"  # intercepted by mock
         self.detected_at = "2026-07-10T00:00:00+00:00"
+        self.filed_at = None
 
 
 @pytest.mark.e2e

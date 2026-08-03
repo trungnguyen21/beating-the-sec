@@ -37,6 +37,7 @@ from workers.client import GeminiClient
 from ingestion.estimates import fetch_estimates
 from delivery.router import SubscriptionRouter
 from models.users import User
+from tests.alert_helpers import assert_valid_alert
 
 SAMPLE_FILING_TICKER = "NVDA"
 SAMPLE_FILING_CIK = "1045810"
@@ -100,14 +101,16 @@ async def test_e2e_parsing_pipeline():
         results=results,
         detected_at=datetime.now(timezone.utc).isoformat(),
         filed_at=filed_at,
+        filing_url=index_url,
     )
     print(json.dumps(alert, indent=2))
 
-    assert alert.get("ticker") == SAMPLE_FILING_TICKER, "alert has wrong ticker"
-    assert 0.0 <= alert.get("signal_score", -1) <= 1.0, "signal_score out of [0, 1]"
-    assert alert.get("signal_label") in {"🟢 Bullish", "🟡 Neutral", "🔴 Bearish"}, "signal_label missing/invalid"
-    assert isinstance(alert.get("eps"), dict), "eps dict missing"
-    assert isinstance(alert.get("revenue"), dict), "revenue dict missing"
+    # Checks the alert's full schema against tests/alert_helpers.py's ALERT_SCHEMA — the same
+    # contract test_aggregator.py enforces — so a schema change surfaces here too, against a
+    # real filing and real AI output, not just the mocked unit-test fixtures.
+    assert_valid_alert(alert)
+    assert alert["ticker"] == SAMPLE_FILING_TICKER, "alert has wrong ticker"
+    assert alert["filing_url"] == index_url, "filing_url not threaded through"
     assert all(not isinstance(v, Exception) for v in results.values()), "one or more workers raised"
 
     if not TEST_DISCORD_WEBHOOK_URL:

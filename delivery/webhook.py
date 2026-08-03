@@ -95,15 +95,20 @@ class DiscordWebhook:
             f"Alerted: {format_display(alert.get('alerted_at'))}"
         )
 
-        return {
-            "embeds": [{
-                "title": f"{ticker} — Earnings Alert",
-                "description": alert.get("headline", ""),
-                "color": color,
-                "fields": fields,
-                "footer": {"text": footer_text},
-            }]
+        embed = {
+            "title": f"{ticker} — Earnings Alert",
+            "description": alert.get("headline", ""),
+            "color": color,
+            "fields": fields,
+            "footer": {"text": footer_text},
         }
+
+        filing_url = alert.get("filing_url")
+        if filing_url:
+            embed["url"] = filing_url
+            fields.append({"name": "Filing", "value": f"[View on SEC EDGAR]({filing_url})", "inline": False})
+
+        return {"embeds": [embed]}
 
     async def send(self, alert: dict) -> None:
         payload = self._build_embed(alert)

@@ -44,6 +44,7 @@ async def _process_one(msg_id: str, filing, queue: FilingQueue,
             results=results,
             detected_at=filing.detected_at,
             filed_at=filing.filed_at,
+            filing_url=filing.index_url,
         )
 
         print(f"🚨 Alert: {alert['signal_label']} — {alert['ticker']}")

@@ -15,13 +15,13 @@ with by hand) would receive this test alert too if the test used a ticker any re
 actually be watching.
 """
 import os
-from datetime import datetime, timezone
 
 import pytest
 from dotenv import load_dotenv
 
 load_dotenv()
 
+from aggregator.aggregator import build_alert
 from delivery.router import SQLiteSubscriptionRouter
 from server.db import (
     add_guild_tickers,
@@ -30,6 +30,7 @@ from server.db import (
     delete_user,
     upsert_guild_channel,
 )
+from tests.alert_helpers import assert_valid_alert, sample_results
 
 TEST_DISCORD_WEBHOOK_URL = os.environ.get("TEST_DISCORD_WEBHOOK_URL")
 TEST_GUILD_ID = "test-e2e-discord-bot-delivery-guild"  # fake Discord guild ID, not a real one
@@ -45,25 +46,19 @@ async def test_e2e_discord_bot_delivery():
             "subscriber webhooks"
         )
 
-    alert = {
-        "ticker": TEST_TICKER,
-        "filed_at": "2026-08-03T16:01:00+00:00",
-        "detected_at": "2026-08-03T16:01:04+00:00",
-        "alerted_at": datetime.now(timezone.utc).isoformat(),
-        "feed_to_detection_seconds": 4.0,
-        "signal_score": 0.78,
-        "signal_label": "🟢 Bullish",
-        "headline": (
-            f"🧪 TEST ALERT — DO NOT ACT ON THIS — "
-            f"{TEST_TICKER} beats on EPS and revenue, raises guidance"
-        ),
-        "eps": {"actual": 1.85, "estimate": 1.70, "result": "beat"},
-        "revenue": {"actual_m": 94500, "estimate_m": 91200, "result": "beat"},
-        "guidance": "raised",
-        "risk_level": "low",
-        "risk_flags": [],
-        "tone": "bullish",
-    }
+    # Built via the real build_alert() — not a hand-copied literal — so this test always sends
+    # whatever the current alert schema actually is. A hardcoded dict here would keep passing
+    # (and keep posting a stale message to Discord) even after the schema changes, which is
+    # exactly the bug this test exists to catch.
+    alert = build_alert(
+        ticker=TEST_TICKER,
+        results=sample_results(),
+        detected_at="2026-08-03T16:01:04+00:00",
+        filed_at="2026-08-03T16:01:00+00:00",
+        filing_url="https://www.sec.gov/Archives/edgar/data/0000000000/000000000000000000/0000000000-26-000000-index.htm",
+    )
+    assert_valid_alert(alert)
+    alert["headline"] = f"🧪 TEST ALERT — DO NOT ACT ON THIS — {alert['headline']}"
 
     try:
         # Seed exactly what /setup + /watch add would produce, so this exercises the real

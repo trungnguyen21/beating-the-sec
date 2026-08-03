@@ -81,7 +81,8 @@ async def run_ai_worker(worker_id: str):
                         sections = split_sections(clean_text)
                         results = await analyze_filing(sections, ai_client, estimates)
                         alert = build_alert(
-                            filing["ticker"], results, filing["detected_at"], filing.get("filed_at")
+                            filing["ticker"], results, filing["detected_at"], filing.get("filed_at"),
+                            filing_url=filing.get("index_url"),
                         )
 
                         await save_alert(filing["ticker"], alert)
