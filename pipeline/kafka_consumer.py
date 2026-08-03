@@ -128,7 +128,12 @@ async def run_delivery_consumer():
                     logger.info(f"  ✓ {sub['id']}")
                 except WebhookGoneError:
                     logger.warning(f"  ✗ {sub['id']}: webhook gone — deactivating guild")
-                    await delete_user(sub["id"])
+                    try:
+                        await delete_user(sub["id"])
+                    except Exception as e:
+                        logger.error(
+                            f"  ✗ {sub['id']}: failed to delete guild after webhook gone: {e}"
+                        )
                 except Exception as e:
                     logger.error(f"  ✗ {sub['id']}: {e}")
 
