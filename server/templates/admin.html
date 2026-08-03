@@ -14,9 +14,6 @@
     form { display: inline; }
     input[type=text], input[type=url] { width: 100%; box-sizing: border-box; }
     #ticker-search { width: 240px; margin-bottom: .5rem; }
-    fieldset { margin-top: .5rem; }
-    .tickers-box { max-height: 140px; overflow-y: auto; border: 1px solid #ccc; padding: .4rem; columns: 3; }
-    .tickers-box label { display: block; font-weight: normal; white-space: nowrap; }
     button { cursor: pointer; }
     .danger { color: #b00; }
     details > summary { cursor: pointer; }
@@ -27,6 +24,53 @@
 </head>
 <body>
 <h1>BSEC Admin</h1>
+
+<h2>Bot activity</h2>
+<table>
+  <tr><th>Guilds</th><th>Active users (30d)</th><th>Commands today</th></tr>
+  <tr>
+    <td>{{ stats.guild_count }}</td>
+    <td>{{ stats.active_users }}</td>
+    <td>{{ stats.commands_today }}</td>
+  </tr>
+</table>
+{% if stats.commands_by_day %}
+<details>
+  <summary>Commands by day (last 30d)</summary>
+  <table>
+    <tr><th>Day</th><th>Commands</th></tr>
+    {% for d in stats.commands_by_day %}
+    <tr><td>{{ d.day }}</td><td>{{ d.count }}</td></tr>
+    {% endfor %}
+  </table>
+</details>
+{% endif %}
+
+<h2>Guilds</h2>
+<table>
+  <tr><th>Name</th><th>Guild ID</th><th>Watchlist size</th><th>Created</th><th>Status</th><th>Actions</th></tr>
+  {% for g in guilds %}
+  <tr>
+    <td>{{ g.name }}</td>
+    <td>{{ g.guild_id }}</td>
+    <td>{{ g.watchlist_size }}</td>
+    <td>{{ g.created_at }}</td>
+    <td>{{ "🚫 banned" if g.banned else "active" }}</td>
+    <td>
+      {% if g.banned %}
+      <form method="post" action="/admin/guilds/{{ g.guild_id }}/unban">
+        <button type="submit">Unban</button>
+      </form>
+      {% else %}
+      <form method="post" action="/admin/guilds/{{ g.guild_id }}/ban" onsubmit="return confirm('Ban {{ g.name }}? This blocks /setup until unbanned.');">
+        <input type="text" name="reason" placeholder="reason (optional)" />
+        <button type="submit" class="danger">Ban</button>
+      </form>
+      {% endif %}
+    </td>
+  </tr>
+  {% endfor %}
+</table>
 
 <h2>Tickers</h2>
 <form method="post" action="/admin/tickers/bulk" style="margin-bottom:.5rem;">
@@ -66,58 +110,6 @@
   <label>CIK<br /><input type="text" name="cik" placeholder="320193" required /></label><br /><br />
   <label>Company name<br /><input type="text" name="title" placeholder="Apple Inc." required /></label><br /><br />
   <button type="submit">Add ticker</button>
-</form>
-
-<h2>Users</h2>
-<table>
-  <tr><th>Name</th><th>Webhook URL</th><th>Tickers</th><th>Created</th><th>Actions</th></tr>
-  {% for u in users %}
-  <tr>
-    <td>{{ u.name }}</td>
-    <td style="max-width: 260px; overflow-wrap: anywhere;">{{ u.webhook_url }}</td>
-    <td>{{ u.tickers | join(", ") }}</td>
-    <td>{{ u.created_at }}</td>
-    <td>
-      <details>
-        <summary>Edit</summary>
-        <form method="post" action="/admin/users/{{ u.id }}">
-          <label>Name<br /><input type="text" name="name" value="{{ u.name }}" required /></label>
-          <label>Webhook URL<br /><input type="url" name="webhook_url" value="{{ u.webhook_url }}" required /></label>
-          <fieldset>
-            <legend>Tickers</legend>
-            <div class="tickers-box">
-              {% for t in tickers %}
-              <label>
-                <input type="checkbox" name="tickers" value="{{ t.ticker }}" {% if t.ticker in u.tickers %}checked{% endif %} />
-                {{ t.ticker }}
-              </label>
-              {% endfor %}
-            </div>
-          </fieldset>
-          <button type="submit">Save</button>
-        </form>
-      </details>
-      <form method="post" action="/admin/users/{{ u.id }}/delete" onsubmit="return confirm('Delete this user?');">
-        <button type="submit" class="danger">Delete</button>
-      </form>
-    </td>
-  </tr>
-  {% endfor %}
-</table>
-
-<h2>Create user</h2>
-<form method="post" action="/admin/users">
-  <label>Name<br /><input type="text" name="name" required /></label><br /><br />
-  <label>Webhook URL<br /><input type="url" name="webhook_url" required /></label>
-  <fieldset>
-    <legend>Tickers</legend>
-    <div class="tickers-box">
-      {% for t in tickers %}
-      <label><input type="checkbox" name="tickers" value="{{ t.ticker }}" /> {{ t.ticker }}</label>
-      {% endfor %}
-    </div>
-  </fieldset>
-  <button type="submit">Create</button>
 </form>
 
 <script>

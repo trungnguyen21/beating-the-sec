@@ -11,6 +11,17 @@ from utils.time_format import format_display
 
 logger = get_logger(__name__)
 
+
+class WebhookGoneError(Exception):
+    """Raised when Discord reports a webhook as deleted/invalid (404/401) — distinct from a
+    transient delivery failure, since a fanout caller may want to stop trying this endpoint
+    entirely rather than just log and retry next time."""
+
+    def __init__(self, status_code: int):
+        self.status_code = status_code
+        super().__init__(f"Discord webhook gone (status {status_code})")
+
+
 _SIGNAL_COLOR = {
     "🟢 Bullish": 0x2ECC71,
     "🟡 Neutral": 0xF1C40F,
@@ -98,7 +109,9 @@ class DiscordWebhook:
         payload = self._build_embed(alert)
         async with httpx.AsyncClient() as client:
             r = await client.post(self.endpoint, json=payload, timeout=10)
-            if r.status_code not in (200, 204):
+            if r.status_code in (404, 401):
+                raise WebhookGoneError(r.status_code)
+            elif r.status_code not in (200, 204):
                 logger.error(f"Discord webhook failed: {r.status_code} — {r.text}")
             else:
                 logger.info(f"Discord alert sent for {alert['ticker']}")
