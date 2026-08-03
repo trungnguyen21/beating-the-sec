@@ -46,7 +46,10 @@ async def _tracked(interaction: discord.Interaction, command: str, args: str):
         success = False
         raise
     finally:
-        await log_command(guild_id, user_id, command, args, success)
+        try:
+            await log_command(guild_id, user_id, command, args, success)
+        except Exception:
+            logger.exception("Failed to log Discord command")
 
 
 def _parse_tickers(raw: str) -> list[str]:
