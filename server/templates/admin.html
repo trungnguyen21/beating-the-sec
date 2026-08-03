@@ -62,7 +62,7 @@
         <button type="submit">Unban</button>
       </form>
       {% else %}
-      <form method="post" action="/admin/guilds/{{ g.guild_id }}/ban" onsubmit="return confirm('Ban {{ g.name }}? This blocks /setup until unbanned.');">
+      <form method="post" action="/admin/guilds/{{ g.guild_id }}/ban" onsubmit="return confirm('Ban this guild? This blocks /setup until unbanned.');">
         <input type="text" name="reason" placeholder="reason (optional)" />
         <button type="submit" class="danger">Ban</button>
       </form>
