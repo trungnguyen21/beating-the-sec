@@ -8,16 +8,12 @@ from pathlib import Path
 from typing import Annotated
 
 from config import ADMIN_PASSWORD, ADMIN_USERNAME
-from delivery.webhook import DiscordWebhook
 from server.db import (
     get_all_tickers,
-    upsert_user_subscriptions,
-    delete_subscriptions_by_webhook,
-    get_recent_alerts,
-    get_all_users,
-    create_user,
-    update_user,
-    delete_user,
+    get_bot_stats,
+    list_guilds,
+    ban_guild,
+    unban_guild,
     set_ticker_active,
     set_all_tickers_active,
     create_ticker,
@@ -46,75 +42,21 @@ def require_admin(credentials: Annotated[HTTPBasicCredentials, Depends(security)
         )
 
 
-@app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    tickers = await get_all_tickers()
-    return templates.TemplateResponse(request, "index.html", {"tickers": tickers})
-
-
-@app.post("/subscribe", response_class=HTMLResponse)
-async def subscribe(
-    request: Request,
-    name: Annotated[str, Form()],
-    webhook_url: Annotated[str, Form()],
-    tickers: Annotated[list[str], Form()] = [],
-):
-    all_tickers = await get_all_tickers()
-
-    if not tickers:
-        return templates.TemplateResponse(request, "index.html", {
-            "tickers": all_tickers,
-            "error": "Select at least one ticker.",
-            "name": name,
-            "webhook_url": webhook_url,
-        })
-
-    await upsert_user_subscriptions(name, webhook_url, tickers)
-
-    # Catch-up: deliver any alerts fired in the last hour for newly subscribed tickers
-    catchup_sent = 0
-    webhook = DiscordWebhook(webhook_url)
-    for ticker in tickers:
-        for alert in await get_recent_alerts(ticker, hours=1):
-            try:
-                await webhook.send(alert)
-                catchup_sent += 1
-            except Exception as e:
-                logger.error(f"Catch-up delivery failed for {ticker}: {e}")
-
-    msg = f"Subscribed to {len(tickers)} ticker(s)."
-    if catchup_sent:
-        msg += f" {catchup_sent} recent alert(s) delivered to your Discord."
-
-    return templates.TemplateResponse(request, "index.html", {
-        "tickers": all_tickers,
-        "success": msg,
-        "name": name,
-        "webhook_url": webhook_url,
-        "selected_tickers": tickers,
-    })
-
-
-@app.post("/unsubscribe", response_class=HTMLResponse)
-async def unsubscribe(
-    request: Request,
-    webhook_url: Annotated[str, Form()],
-):
-    removed = await delete_subscriptions_by_webhook(webhook_url)
-    tickers = await get_all_tickers()
-    return templates.TemplateResponse(request, "index.html", {
-        "tickers": tickers,
-        "info": "Unsubscribed successfully." if removed else "No subscription found for that webhook URL.",
-    })
-
-
 # --- Admin dashboard -------------------------------------------------------
+# Subscriptions are entirely managed via the Discord bot's /setup and /watch commands now — see
+# docs/DISCORD_INTEGRATION.md. This dashboard only offers ticker-universe management, visibility
+# into real guilds, and the ban/unban kill switch — no direct editing of a guild's watchlist,
+# since that's a Discord-only action for the guild's own admin, not something to do on their
+# behalf from here.
 
 @app.get("/admin", response_class=HTMLResponse)
 async def admin_dashboard(request: Request, _: Annotated[None, Depends(require_admin)]):
     tickers = await get_all_tickers()
-    users = await get_all_users()
-    return templates.TemplateResponse(request, "admin.html", {"tickers": tickers, "users": users})
+    guilds = await list_guilds()
+    stats = await get_bot_stats()
+    return templates.TemplateResponse(
+        request, "admin.html", {"tickers": tickers, "guilds": guilds, "stats": stats}
+    )
 
 
 @app.post("/admin/tickers/toggle", response_class=RedirectResponse)
@@ -158,35 +100,20 @@ async def admin_delete_ticker(
     return RedirectResponse("/admin", status_code=status.HTTP_303_SEE_OTHER)
 
 
-@app.post("/admin/users", response_class=RedirectResponse)
-async def admin_create_user(
+@app.post("/admin/guilds/{guild_id}/ban", response_class=RedirectResponse)
+async def admin_ban_guild(
     _: Annotated[None, Depends(require_admin)],
-    name: Annotated[str, Form()],
-    webhook_url: Annotated[str, Form()],
-    tickers: Annotated[list[str], Form()] = [],
+    guild_id: str,
+    reason: Annotated[str, Form()] = "",
 ):
-    await create_user(name, webhook_url, tickers)
+    await ban_guild(guild_id, reason)
     return RedirectResponse("/admin", status_code=status.HTTP_303_SEE_OTHER)
 
 
-@app.post("/admin/users/{user_id}", response_class=RedirectResponse)
-async def admin_update_user(
+@app.post("/admin/guilds/{guild_id}/unban", response_class=RedirectResponse)
+async def admin_unban_guild(
     _: Annotated[None, Depends(require_admin)],
-    user_id: str,
-    name: Annotated[str, Form()],
-    webhook_url: Annotated[str, Form()],
-    tickers: Annotated[list[str], Form()] = [],
+    guild_id: str,
 ):
-    found = await update_user(user_id, name, webhook_url, tickers)
-    if not found:
-        raise HTTPException(status_code=404, detail="User not found")
-    return RedirectResponse("/admin", status_code=status.HTTP_303_SEE_OTHER)
-
-
-@app.post("/admin/users/{user_id}/delete", response_class=RedirectResponse)
-async def admin_delete_user(
-    _: Annotated[None, Depends(require_admin)],
-    user_id: str,
-):
-    await delete_user(user_id)
+    await unban_guild(guild_id)
     return RedirectResponse("/admin", status_code=status.HTTP_303_SEE_OTHER)

@@ -44,6 +44,7 @@ async def _process_one(msg_id: str, filing, queue: FilingQueue,
             results=results,
             detected_at=filing.detected_at,
             filed_at=filing.filed_at,
+            filing_url=filing.index_url,
         )
 
         print(f"🚨 Alert: {alert['signal_label']} — {alert['ticker']}")
@@ -78,7 +79,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="SEC filing alert pipeline")
     parser.add_argument(
         "--stage",
-        choices=["ingestion", "ai-worker", "delivery", "server"],
+        choices=["ingestion", "ai-worker", "delivery", "server", "discord-bot"],
         default=None,
         help=(
             "Run a single pipeline stage independently. "
@@ -92,9 +93,9 @@ async def main():
     args = _parse_args()
 
     if args.stage == "ingestion":
-        # Only poll tickers with is_active = 1 (i.e. at least one subscriber) — see
-        # server/db.py's get_active_tickers/upsert_user_subscriptions for how that flag is kept
-        # in sync with the subscriptions table.
+        # Only poll tickers with is_active = 1 (i.e. at least one guild watching it) — see
+        # server/db.py's get_active_tickers/add_guild_tickers for how that flag is kept in
+        # sync with the subscriptions table.
         watchlist = await get_active_tickers()
         async with KafkaFilingQueue() as queue:
             await run_watcher(watchlist, queue)
@@ -111,6 +112,10 @@ async def main():
         from server.app import app as web_app
         config = uvicorn.Config(web_app, host="0.0.0.0", port=8000)
         await uvicorn.Server(config).serve()
+
+    elif args.stage == "discord-bot":
+        from discord_bot.bot import run_bot
+        await run_bot()
 
     else:
         # Dev mode: single-process, in-memory queue, SQLite for both the ticker list
