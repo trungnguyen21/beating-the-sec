@@ -4,10 +4,10 @@ Fan out delivery service for all users who subscribed to a ticker
 
 from typing import List
 
-from delivery.webhook import DiscordWebhook
+from delivery.webhook import DiscordWebhook, WebhookGoneError
 from utils.logger import get_logger
 from models.users import User
-from server.db import get_subscribers_for_ticker, save_alert
+from server.db import delete_user, get_subscribers_for_ticker, save_alert
 
 logger = get_logger(__name__)
 
@@ -46,6 +46,14 @@ class SQLiteSubscriptionRouter:
             try:
                 await DiscordWebhook(sub["webhook_url"]).send(alert)
                 logger.info(f"  ✓ {sub['id']}")
+            except WebhookGoneError:
+                logger.warning(f"  ✗ {sub['id']}: webhook gone — deactivating guild")
+                try:
+                    await delete_user(sub["id"])
+                except Exception as e:
+                    logger.error(
+                        f"  ✗ {sub['id']}: failed to delete guild after webhook gone: {e}"
+                    )
             except Exception as e:
                 logger.debug(str(e))
                 logger.error(f"  ✗ {sub['id']}: {e}")

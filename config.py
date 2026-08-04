@@ -35,3 +35,9 @@ DB_PATH = os.getenv("DB_PATH", "bsec.db")
 
 ADMIN_USERNAME = os.getenv("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD")
+
+DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+# Optional: a Discord guild ID to sync commands to instantly during development, instead of a
+# global sync (which can take up to ~1hr to propagate). Unset in production — a global sync is
+# required for the bot to work in servers other than this one.
+DISCORD_DEV_GUILD_ID = os.getenv("DISCORD_DEV_GUILD_ID")
