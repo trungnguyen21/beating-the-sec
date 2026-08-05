@@ -1,5 +1,5 @@
 """
-Daily earnings-calendar refresh. Reads every ticker from the SQLite `tickers` table (NOT
+Daily earnings-calendar refresh. Reads every ticker from the Postgres `tickers` table (NOT
 watchlist.json directly — run `db/seed.py` first/periodically to keep `tickers` in sync from
 watchlist.json), sequentially fetches each one's next earnings date via yfinance, and upserts
 the result into `earnings_calendar`. Sequential and slow on purpose — see docs/checklist.md
@@ -16,15 +16,17 @@ what day it is when invoked, it just refreshes the whole {ticker: date} mapping 
 
 Run manually with:
     python -m db.refresh_calendar
-    python -m db.refresh_calendar --db path/to/other.db
+    python -m db.refresh_calendar --database-url postgresql://...
 """
 
 import argparse
 import asyncio
-import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
+import psycopg
+
+from config import DATABASE_URL
 from db.schema import ensure_schema
 from ingestion.estimates import fetch_next_earnings_datetime, ticker_exists
 from utils.logger import get_logger
@@ -36,45 +38,40 @@ ROOT = Path(__file__).parent.parent
 
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
-    p.add_argument("--db", default=str(ROOT / "bsec.db"))
+    p.add_argument("--database-url", default=DATABASE_URL)
     return p.parse_args()
 
 
-def _load_tickers(db_path: str) -> list[str]:
-    conn = sqlite3.connect(db_path)
-    rows = conn.execute("SELECT ticker FROM tickers ORDER BY ticker").fetchall()
-    conn.close()
+def _load_tickers(database_url: str) -> list[str]:
+    with psycopg.connect(database_url) as conn:
+        rows = conn.execute("SELECT ticker FROM tickers ORDER BY ticker").fetchall()
     return [r[0] for r in rows]
 
 
-def _remove_tickers(db_path: str, tickers: list[str]) -> None:
+def _remove_tickers(database_url: str, tickers: list[str]) -> None:
     """Deletes from `tickers` — cascades (ON DELETE CASCADE) to earnings_calendar and
     subscriptions, since a ticker yfinance can't find at all has no business staying in the
     polling list or the calendar. `alerts` is untouched — it's a historical log, not a FK."""
-    conn = sqlite3.connect(db_path)
-    conn.executemany("DELETE FROM tickers WHERE ticker = ?", [(t,) for t in tickers])
-    conn.commit()
-    conn.close()
+    with psycopg.connect(database_url, autocommit=True) as conn, conn.cursor() as cur:
+        cur.executemany("DELETE FROM tickers WHERE ticker = %s", [(t,) for t in tickers])
 
 
-def _upsert_calendar(db_path: str, results: dict[str, tuple[str | None, str | None]]) -> None:
+def _upsert_calendar(database_url: str, results: dict[str, tuple[str | None, str | None]]) -> None:
     now = datetime.now(timezone.utc).isoformat()
-    conn = sqlite3.connect(db_path)
-    conn.executemany(
-        """INSERT INTO earnings_calendar (ticker, earnings_date, earnings_time, updated_at)
-           VALUES (?, ?, ?, ?)
-           ON CONFLICT(ticker) DO UPDATE SET earnings_date = excluded.earnings_date,
-                                              earnings_time = excluded.earnings_time,
-                                              updated_at = excluded.updated_at""",
-        [(ticker, date, time_, now) for ticker, (date, time_) in results.items()],
-    )
-    conn.commit()
-    conn.close()
+    with psycopg.connect(database_url, autocommit=True) as conn, conn.cursor() as cur:
+        cur.executemany(
+            """INSERT INTO earnings_calendar (ticker, earnings_date, earnings_time, updated_at)
+               VALUES (%s, %s, %s, %s)
+               ON CONFLICT(ticker) DO UPDATE SET earnings_date = excluded.earnings_date,
+                                                  earnings_time = excluded.earnings_time,
+                                                  updated_at = excluded.updated_at""",
+            [(ticker, date, time_, now) for ticker, (date, time_) in results.items()],
+        )
 
 
-async def refresh(db_path: str) -> None:
-    ensure_schema(db_path)
-    tickers = _load_tickers(db_path)
+async def refresh(database_url: str) -> None:
+    ensure_schema(database_url)
+    tickers = _load_tickers(database_url)
     logger.info(f"Refreshing earnings calendar for {len(tickers)} ticker(s) — sequential, this will take a while")
 
     results: dict[str, tuple[str | None, str | None]] = {}
@@ -99,10 +96,10 @@ async def refresh(db_path: str) -> None:
         if i % 50 == 0:
             logger.info(f"  progress: {i}/{len(tickers)} ({found} found, {missing} no date)")
 
-    _upsert_calendar(db_path, results)
+    _upsert_calendar(database_url, results)
 
     if invalid:
-        _remove_tickers(db_path, invalid)
+        _remove_tickers(database_url, invalid)
         logger.warning(f"Removed {len(invalid)} not-found ticker(s) from tickers/calendar: {invalid}")
 
     logger.info(f"Calendar refresh complete: {found} with a date, {missing} without, {len(tickers)} total")
@@ -110,7 +107,7 @@ async def refresh(db_path: str) -> None:
 
 def main() -> None:
     args = _parse_args()
-    asyncio.run(refresh(args.db))
+    asyncio.run(refresh(args.database_url))
 
 
 if __name__ == "__main__":

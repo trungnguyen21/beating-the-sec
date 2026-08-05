@@ -3,16 +3,27 @@ from datetime import datetime, timezone
 
 from utils.time_format import parse_timestamp
 
+
+def _safe_float(value, default: float) -> float:
+    """Coerce worker output to float, tolerating None/missing/unparseable values."""
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def compute_signal_score(results: dict) -> float:
     """
     Simple signal score: 0.0 (very bearish) to 1.0 (very bullish).
     Adjust weights to your strategy.
     """
     score = 0.5  # Neutral baseline
-    
-    ext = results.get("extraction", {})
-    sent = results.get("sentiment", {})
-    risk = results.get("risk", {})
+
+    ext = results.get("extraction") or {}
+    sent = results.get("sentiment") or {}
+    risk = results.get("risk") or {}
     
     # EPS beat/miss
     if ext.get("eps_beat") == "beat":
@@ -36,10 +47,8 @@ def compute_signal_score(results: dict) -> float:
     
     # Sentiment — scale tone contribution by confidence (0.0–1.0)
     tone_map = {"bullish": 0.15, "neutral": 0.0, "cautious": -0.05, "bearish": -0.20}
-    confidence = 0.1
-    if confidence:
-        confidence = float(sent.get("confidence_score", 0.5))
-    score += tone_map.get(sent.get("overall_tone", "neutral"), 0) * confidence
+    confidence = _safe_float(sent.get("confidence_score"), default=0.5)
+    score += tone_map.get(sent.get("overall_tone") or "neutral", 0) * confidence
     
     # Risk
     if risk.get("guidance_cut_detected"):
@@ -47,16 +56,16 @@ def compute_signal_score(results: dict) -> float:
     if risk.get("going_concern_detected"):
         score -= 0.30
     risk_map = {"low": 0.05, "medium": 0.0, "high": -0.10, "critical": -0.25}
-    score += risk_map.get(risk.get("risk_level", "medium"), 0)
+    score += risk_map.get(risk.get("risk_level") or "medium", 0)
     
     return round(max(0.0, min(1.0, score)), 2)
 
 def build_alert(ticker: str, results: dict, detected_at: str, filed_at: str | datetime | None = None,
                  filing_url: str | None = None) -> dict:
     score = compute_signal_score(results)
-    ext = results.get("extraction", {})
-    sent = results.get("sentiment", {})
-    risk = results.get("risk", {})
+    ext = results.get("extraction") or {}
+    sent = results.get("sentiment") or {}
+    risk = results.get("risk") or {}
 
     filed_dt = parse_timestamp(filed_at)
     detected_dt = parse_timestamp(detected_at)
@@ -87,6 +96,6 @@ def build_alert(ticker: str, results: dict, detected_at: str, filed_at: str | da
         },
         "guidance": ext.get("guidance_direction"),
         "risk_level": risk.get("risk_level"),
-        "risk_flags": [f["description"] for f in risk.get("flags", [])],
+        "risk_flags": [f.get("description") for f in (risk.get("flags") or [])],
         "tone": sent.get("overall_tone"),
     }

@@ -73,7 +73,7 @@ async def test_e2e_discord_bot_delivery():
         router = SQLiteSubscriptionRouter()
         await router.fanout(TEST_TICKER, alert)
     finally:
-        # Don't leave the seeded test guild/ticker in the shared bsec.db. delete_ticker cascades
+        # Don't leave the seeded test guild/ticker in the shared Postgres DB. delete_ticker cascades
         # subscriptions; delete_user removes the guild row itself.
         await delete_user(TEST_GUILD_ID)
         await delete_ticker(TEST_TICKER)
