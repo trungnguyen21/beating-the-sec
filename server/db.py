@@ -1,10 +1,12 @@
+import asyncio
 import json
 import uuid
 from datetime import datetime, timezone, timedelta
 
-import aiosqlite
+import psycopg
+from psycopg_pool import AsyncConnectionPool
 
-from config import DB_PATH
+from config import DATABASE_URL
 
 
 class GuildNotSetUpError(Exception):
@@ -15,14 +17,31 @@ class GuildNotSetUpError(Exception):
         super().__init__(f"Guild {guild_id} has no alert channel configured — run /setup first")
 
 
+_pool: AsyncConnectionPool | None = None
+_pool_lock = asyncio.Lock()
+
+
+async def _get_pool() -> AsyncConnectionPool:
+    """Lazily opens a single shared connection pool on first use. Lazy (rather than opened at
+    import time) because opening a pool requires a running event loop, and this module is
+    imported by both the FastAPI admin app and the discord bot before either loop starts."""
+    global _pool
+    if _pool is None:
+        async with _pool_lock:
+            if _pool is None:
+                pool = AsyncConnectionPool(DATABASE_URL, open=False)
+                await pool.open()
+                _pool = pool
+    return _pool
+
+
 async def get_all_tickers() -> list[dict]:
     """Every ticker, active or not — used by the admin ticker-management view, which needs to
     offer the full universe regardless of current polling status."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT ticker, title, is_active FROM tickers ORDER BY ticker"
-        ) as cur:
-            rows = await cur.fetchall()
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute("SELECT ticker, title, is_active FROM tickers ORDER BY ticker")
+        rows = await cur.fetchall()
     return [{"ticker": r[0], "title": r[1], "is_active": bool(r[2])} for r in rows]
 
 
@@ -31,21 +50,20 @@ async def get_active_tickers() -> list[dict]:
     when it gets its first guild subscriber (add_guild_tickers) and inactive again once its
     last one drops it (remove_guild_tickers/delete_user) — this keeps SEC/yfinance request
     volume tied to real demand instead of the full ~500-ticker calendar universe."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT ticker, title FROM tickers WHERE is_active = 1 ORDER BY ticker"
-        ) as cur:
-            rows = await cur.fetchall()
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute("SELECT ticker, title FROM tickers WHERE is_active = 1 ORDER BY ticker")
+        rows = await cur.fetchall()
     return [{"ticker": r[0], "title": r[1]} for r in rows]
 
 
-async def _deactivate_orphaned_tickers(db: aiosqlite.Connection, candidates: set[str]) -> None:
+async def _deactivate_orphaned_tickers(db: psycopg.AsyncConnection, candidates: set[str]) -> None:
     """For each candidate ticker, set is_active = 0 if no subscription references it anymore.
     Called with the tickers a change *might* have orphaned — not every ticker in the DB — so
     callers must pass only the ones actually affected by their delete/replace."""
     if not candidates:
         return
-    placeholders = ",".join("?" * len(candidates))
+    placeholders = ",".join(["%s"] * len(candidates))
     await db.execute(
         f"""UPDATE tickers SET is_active = 0
             WHERE ticker IN ({placeholders})
@@ -54,9 +72,9 @@ async def _deactivate_orphaned_tickers(db: aiosqlite.Connection, candidates: set
     )
 
 
-async def _guild_exists(db: aiosqlite.Connection, guild_id: str) -> bool:
-    async with db.execute("SELECT 1 FROM users WHERE id = ?", (guild_id,)) as cur:
-        return await cur.fetchone() is not None
+async def _guild_exists(db: psycopg.AsyncConnection, guild_id: str) -> bool:
+    cur = await db.execute("SELECT 1 FROM users WHERE id = %s", (guild_id,))
+    return await cur.fetchone() is not None
 
 
 async def upsert_guild_channel(guild_id: str, name: str, webhook_url: str) -> None:
@@ -65,10 +83,11 @@ async def upsert_guild_channel(guild_id: str, name: str, webhook_url: str) -> No
     same row instead of creating an orphan. Deliberately does not touch `subscriptions` —
     rerunning /setup must never clear the watchlist, only change where alerts go."""
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    pool = await _get_pool()
+    async with pool.connection() as db:
         await db.execute(
             """INSERT INTO users (id, name, webhook_url, created_at)
-               VALUES (?, ?, ?, ?)
+               VALUES (%s, %s, %s, %s)
                ON CONFLICT(id) DO UPDATE SET name = excluded.name,
                                              webhook_url = excluded.webhook_url""",
             (guild_id, name, webhook_url, now),
@@ -85,35 +104,34 @@ async def add_guild_tickers(guild_id: str, tickers: list[str]) -> dict[str, list
     tickers = list(dict.fromkeys(tickers))  # de-dupe, preserve order
 
     now = datetime.now(timezone.utc).isoformat()
-    placeholders = ",".join("?" * len(tickers))
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA foreign_keys = ON")
+    placeholders = ",".join(["%s"] * len(tickers))
+    pool = await _get_pool()
+    async with pool.connection() as db:
         if not await _guild_exists(db, guild_id):
             raise GuildNotSetUpError(guild_id)
 
-        async with db.execute(
-            f"SELECT ticker FROM tickers WHERE ticker IN ({placeholders})", tickers
-        ) as cur:
-            known = {r[0] for r in await cur.fetchall()}
+        cur = await db.execute(f"SELECT ticker FROM tickers WHERE ticker IN ({placeholders})", tickers)
+        known = {r[0] for r in await cur.fetchall()}
         unknown = [t for t in tickers if t not in known]
 
-        async with db.execute(
+        cur = await db.execute(
             f"""SELECT ticker FROM subscriptions
-                WHERE user_id = ? AND ticker IN ({placeholders})""",
+                WHERE user_id = %s AND ticker IN ({placeholders})""",
             (guild_id, *tickers),
-        ) as cur:
-            already_watched = {r[0] for r in await cur.fetchall()}
+        )
+        already_watched = {r[0] for r in await cur.fetchall()}
 
         to_add = [t for t in tickers if t in known and t not in already_watched]
 
-        await db.executemany(
-            "INSERT OR IGNORE INTO subscriptions (user_id, ticker, subscribed_at) VALUES (?, ?, ?)",
-            [(guild_id, t, now) for t in to_add],
-        )
-        await db.executemany(
-            "UPDATE tickers SET is_active = 1 WHERE ticker = ?",
-            [(t,) for t in to_add],
-        )
+        async with db.cursor() as cur:
+            await cur.executemany(
+                "INSERT INTO subscriptions (user_id, ticker, subscribed_at) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+                [(guild_id, t, now) for t in to_add],
+            )
+            await cur.executemany(
+                "UPDATE tickers SET is_active = 1 WHERE ticker = %s",
+                [(t,) for t in to_add],
+            )
         await db.commit()
 
     return {
@@ -130,24 +148,25 @@ async def remove_guild_tickers(guild_id: str, tickers: list[str]) -> list[str]:
     if not tickers:
         return []
 
-    placeholders = ",".join("?" * len(tickers))
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA foreign_keys = ON")
+    placeholders = ",".join(["%s"] * len(tickers))
+    pool = await _get_pool()
+    async with pool.connection() as db:
         if not await _guild_exists(db, guild_id):
             raise GuildNotSetUpError(guild_id)
 
-        async with db.execute(
+        cur = await db.execute(
             f"""SELECT ticker FROM subscriptions
-                WHERE user_id = ? AND ticker IN ({placeholders})""",
+                WHERE user_id = %s AND ticker IN ({placeholders})""",
             (guild_id, *tickers),
-        ) as cur:
-            removed = [r[0] for r in await cur.fetchall()]
+        )
+        removed = [r[0] for r in await cur.fetchall()]
 
         if removed:
-            await db.executemany(
-                "DELETE FROM subscriptions WHERE user_id = ? AND ticker = ?",
-                [(guild_id, t) for t in removed],
-            )
+            async with db.cursor() as cur:
+                await cur.executemany(
+                    "DELETE FROM subscriptions WHERE user_id = %s AND ticker = %s",
+                    [(guild_id, t) for t in removed],
+                )
             await _deactivate_orphaned_tickers(db, set(removed))
         await db.commit()
 
@@ -155,30 +174,28 @@ async def remove_guild_tickers(guild_id: str, tickers: list[str]) -> list[str]:
 
 
 async def get_guild_watchlist(guild_id: str) -> list[str]:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT ticker FROM subscriptions WHERE user_id = ? ORDER BY ticker", (guild_id,)
-        ) as cur:
-            return [r[0] for r in await cur.fetchall()]
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute(
+            "SELECT ticker FROM subscriptions WHERE user_id = %s ORDER BY ticker", (guild_id,)
+        )
+        return [r[0] for r in await cur.fetchall()]
 
 
 async def delete_user(user_id: str) -> bool:
     """Delete a guild's row outright (cascades subscriptions). Used by on_guild_remove and by
     the dead-webhook cleanup path in delivery/router.py. Returns False if not found. Does NOT
     touch banned_guilds — a kicked/removed bot must not clear a ban."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA foreign_keys = ON")
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute("SELECT id FROM users WHERE id = %s", (user_id,))
+        if not await cur.fetchone():
+            return False
 
-        async with db.execute("SELECT id FROM users WHERE id = ?", (user_id,)) as cur:
-            if not await cur.fetchone():
-                return False
+        cur = await db.execute("SELECT ticker FROM subscriptions WHERE user_id = %s", (user_id,))
+        affected = {r[0] for r in await cur.fetchall()}
 
-        async with db.execute(
-            "SELECT ticker FROM subscriptions WHERE user_id = ?", (user_id,)
-        ) as cur:
-            affected = {r[0] for r in await cur.fetchall()}
-
-        await db.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        await db.execute("DELETE FROM users WHERE id = %s", (user_id,))
         await _deactivate_orphaned_tickers(db, affected)
         await db.commit()
     return True
@@ -188,29 +205,31 @@ async def delete_ticker(ticker: str) -> bool:
     """Remove a ticker from the universe entirely. Cascades to its subscriptions and earnings
     calendar row (ON DELETE CASCADE), so any guild watching it silently loses that subscription
     — same tradeoff as delete_user. Returns False if the ticker doesn't exist."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA foreign_keys = ON")
-        async with db.execute("SELECT 1 FROM tickers WHERE ticker = ?", (ticker,)) as cur:
-            if not await cur.fetchone():
-                return False
-        await db.execute("DELETE FROM tickers WHERE ticker = ?", (ticker,))
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute("SELECT 1 FROM tickers WHERE ticker = %s", (ticker,))
+        if not await cur.fetchone():
+            return False
+        await db.execute("DELETE FROM tickers WHERE ticker = %s", (ticker,))
         await db.commit()
     return True
 
 
 async def set_ticker_active(ticker: str, active: bool) -> None:
     """Admin override for a ticker's polling status, independent of subscriber count."""
-    async with aiosqlite.connect(DB_PATH) as db:
+    pool = await _get_pool()
+    async with pool.connection() as db:
         await db.execute(
-            "UPDATE tickers SET is_active = ? WHERE ticker = ?", (1 if active else 0, ticker)
+            "UPDATE tickers SET is_active = %s WHERE ticker = %s", (1 if active else 0, ticker)
         )
         await db.commit()
 
 
 async def set_all_tickers_active(active: bool) -> None:
     """Bulk admin override — activate/deactivate every ticker regardless of subscribers."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("UPDATE tickers SET is_active = ?", (1 if active else 0,))
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        await db.execute("UPDATE tickers SET is_active = %s", (1 if active else 0,))
         await db.commit()
 
 
@@ -219,12 +238,13 @@ async def create_ticker(ticker: str, cik: str, title: str) -> bool:
     hand means they want it polled. Returns False if the ticker already exists."""
     ticker = ticker.strip().upper()
     cik = str(int(cik)).zfill(10)
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT 1 FROM tickers WHERE ticker = ?", (ticker,)) as cur:
-            if await cur.fetchone():
-                return False
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute("SELECT 1 FROM tickers WHERE ticker = %s", (ticker,))
+        if await cur.fetchone():
+            return False
         await db.execute(
-            "INSERT INTO tickers (ticker, cik, title, is_active) VALUES (?, ?, ?, 1)",
+            "INSERT INTO tickers (ticker, cik, title, is_active) VALUES (%s, %s, %s, 1)",
             (ticker, cik, title),
         )
         await db.commit()
@@ -233,24 +253,26 @@ async def create_ticker(ticker: str, cik: str, title: str) -> bool:
 
 async def get_subscribers_for_ticker(ticker: str) -> list[dict]:
     """Returns [{id, webhook_url}] for all guilds subscribed to ticker."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute(
             """SELECT u.id, u.webhook_url
                FROM users u
                JOIN subscriptions s ON u.id = s.user_id
-               WHERE s.ticker = ?""",
+               WHERE s.ticker = %s""",
             (ticker,),
-        ) as cur:
-            rows = await cur.fetchall()
+        )
+        rows = await cur.fetchall()
     return [{"id": r[0], "webhook_url": r[1]} for r in rows]
 
 
 async def save_alert(ticker: str, alert: dict) -> None:
     """Persist a processed alert so new subscribers can receive it as a catch-up."""
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    pool = await _get_pool()
+    async with pool.connection() as db:
         await db.execute(
-            "INSERT INTO alerts (id, ticker, alert_json, detected_at, created_at) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO alerts (id, ticker, alert_json, detected_at, created_at) VALUES (%s, %s, %s, %s, %s)",
             (str(uuid.uuid4()), ticker, json.dumps(alert), alert.get("detected_at", now), now),
         )
         await db.commit()
@@ -259,14 +281,15 @@ async def save_alert(ticker: str, alert: dict) -> None:
 async def get_recent_alerts(ticker: str, hours: int = 1) -> list[dict]:
     """Return alerts for ticker detected within the last N hours, newest first."""
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute(
             """SELECT alert_json FROM alerts
-               WHERE ticker = ? AND detected_at > ?
+               WHERE ticker = %s AND detected_at > %s
                ORDER BY detected_at DESC""",
             (ticker, cutoff),
-        ) as cur:
-            rows = await cur.fetchall()
+        )
+        rows = await cur.fetchall()
     return [json.loads(r[0]) for r in rows]
 
 
@@ -279,31 +302,32 @@ async def log_command(
     per day", neither of which is derivable from current-state tables. Called from a single
     wrapper around every command handler, not duplicated per-command."""
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    pool = await _get_pool()
+    async with pool.connection() as db:
         await db.execute(
             """INSERT INTO bot_command_log
                (id, guild_id, discord_user_id, command, args, success, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
             (str(uuid.uuid4()), guild_id, discord_user_id, command, args, 1 if success else 0, now),
         )
         await db.commit()
 
 
 async def is_guild_banned(guild_id: str) -> bool:
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT 1 FROM banned_guilds WHERE guild_id = ?", (guild_id,)
-        ) as cur:
-            return await cur.fetchone() is not None
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute("SELECT 1 FROM banned_guilds WHERE guild_id = %s", (guild_id,))
+        return await cur.fetchone() is not None
 
 
 async def ban_guild(guild_id: str, reason: str = "") -> None:
     """Separate from `users` on purpose — must survive the guild's row being deleted (kicked bot,
     on_guild_remove) so re-inviting to dodge a ban doesn't work. /setup checks this first."""
     now = datetime.now(timezone.utc).isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
+    pool = await _get_pool()
+    async with pool.connection() as db:
         await db.execute(
-            """INSERT INTO banned_guilds (guild_id, reason, banned_at) VALUES (?, ?, ?)
+            """INSERT INTO banned_guilds (guild_id, reason, banned_at) VALUES (%s, %s, %s)
                ON CONFLICT(guild_id) DO UPDATE SET reason = excluded.reason,
                                                     banned_at = excluded.banned_at""",
             (guild_id, reason, now),
@@ -312,8 +336,9 @@ async def ban_guild(guild_id: str, reason: str = "") -> None:
 
 
 async def unban_guild(guild_id: str) -> None:
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("DELETE FROM banned_guilds WHERE guild_id = ?", (guild_id,))
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        await db.execute("DELETE FROM banned_guilds WHERE guild_id = %s", (guild_id,))
         await db.commit()
 
 
@@ -323,27 +348,28 @@ async def get_bot_stats(active_window_days: int = 30) -> dict:
     breakdown for the admin stats panel."""
     since = (datetime.now(timezone.utc) - timedelta(days=active_window_days)).isoformat()
     today = datetime.now(timezone.utc).date().isoformat()
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute("SELECT COUNT(*) FROM users") as cur:
-            guild_count = (await cur.fetchone())[0]
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute("SELECT COUNT(*) FROM users")
+        guild_count = (await cur.fetchone())[0]
 
-        async with db.execute(
-            "SELECT COUNT(DISTINCT discord_user_id) FROM bot_command_log WHERE created_at >= ?",
+        cur = await db.execute(
+            "SELECT COUNT(DISTINCT discord_user_id) FROM bot_command_log WHERE created_at >= %s",
             (since,),
-        ) as cur:
-            active_users = (await cur.fetchone())[0]
+        )
+        active_users = (await cur.fetchone())[0]
 
-        async with db.execute(
-            "SELECT COUNT(*) FROM bot_command_log WHERE substr(created_at, 1, 10) = ?", (today,)
-        ) as cur:
-            commands_today = (await cur.fetchone())[0]
+        cur = await db.execute(
+            "SELECT COUNT(*) FROM bot_command_log WHERE substr(created_at, 1, 10) = %s", (today,)
+        )
+        commands_today = (await cur.fetchone())[0]
 
-        async with db.execute(
+        cur = await db.execute(
             """SELECT substr(created_at, 1, 10) AS day, COUNT(*)
-               FROM bot_command_log WHERE created_at >= ? GROUP BY day ORDER BY day""",
+               FROM bot_command_log WHERE created_at >= %s GROUP BY day ORDER BY day""",
             (since,),
-        ) as cur:
-            commands_by_day = [{"day": r[0], "count": r[1]} for r in await cur.fetchall()]
+        )
+        commands_by_day = [{"day": r[0], "count": r[1]} for r in await cur.fetchall()]
 
     return {
         "guild_count": guild_count,
@@ -356,20 +382,19 @@ async def get_bot_stats(active_window_days: int = 30) -> dict:
 async def list_guilds() -> list[dict]:
     """Real guilds with their alert channel, watchlist size, and ban status — for the admin
     visibility view."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        async with db.execute(
-            "SELECT id, name, webhook_url, created_at FROM users ORDER BY created_at DESC"
-        ) as cur:
-            guilds = [
-                {"guild_id": r[0], "name": r[1], "webhook_url": r[2], "created_at": r[3]}
-                for r in await cur.fetchall()
-            ]
-        async with db.execute("SELECT user_id, ticker FROM subscriptions") as cur:
-            watch_count: dict[str, int] = {}
-            for guild_id, _ticker in await cur.fetchall():
-                watch_count[guild_id] = watch_count.get(guild_id, 0) + 1
-        async with db.execute("SELECT guild_id FROM banned_guilds") as cur:
-            banned = {r[0] for r in await cur.fetchall()}
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute("SELECT id, name, webhook_url, created_at FROM users ORDER BY created_at DESC")
+        guilds = [
+            {"guild_id": r[0], "name": r[1], "webhook_url": r[2], "created_at": r[3]}
+            for r in await cur.fetchall()
+        ]
+        cur = await db.execute("SELECT user_id, ticker FROM subscriptions")
+        watch_count: dict[str, int] = {}
+        for guild_id, _ticker in await cur.fetchall():
+            watch_count[guild_id] = watch_count.get(guild_id, 0) + 1
+        cur = await db.execute("SELECT guild_id FROM banned_guilds")
+        banned = {r[0] for r in await cur.fetchall()}
 
     for g in guilds:
         g["watchlist_size"] = watch_count.get(g["guild_id"], 0)

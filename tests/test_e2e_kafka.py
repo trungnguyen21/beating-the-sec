@@ -16,7 +16,7 @@ Real:
     reads from in production, NOT data/users.json (that's a separate, legacy config path
     used only by main.py's no-flag dev mode). The test seeds its own guild subscriber row
     directly via upsert_guild_channel/add_guild_tickers so it's self-contained and doesn't
-    silently pass or hang depending on whatever happens to already be in bsec.db.
+    silently pass or hang depending on whatever happens to already be in the Postgres DB.
 
 Requires CONFLUENT_BOOTSTRAP / CONFLUENT_API_KEY / CONFLUENT_API_SECRET in .env, an active
 Confluent cluster, and raw_filings/filing_results topics created. Requires the ticker used

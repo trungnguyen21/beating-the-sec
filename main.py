@@ -118,12 +118,13 @@ async def main():
         await run_bot()
 
     else:
-        # Dev mode: single-process, in-memory queue, SQLite for both the ticker list
-        # (tickers table, filtered to is_active) and delivery routing (subscriptions table) —
-        # same source of truth as the multi-stage production path, just collapsed into one
-        # process.
+        # Single-process mode: in-memory queue, Postgres for both the ticker list (tickers
+        # table, filtered to is_active) and delivery routing (subscriptions table) — same
+        # source of truth as the multi-stage Kafka path, just collapsed into one process.
+        # This is also the `pipeline` container's mode in docker-compose.yml — no Kafka
+        # dependency, so it's the simplest way to run the whole ingest→analyze→deliver flow.
         watchlist = await get_active_tickers()
-        print(f"🚀 Starting dev mode — {len(watchlist)} active ticker(s) loaded from SQLite")
+        print(f"🚀 Starting pipeline — {len(watchlist)} active ticker(s) loaded from Postgres")
         router = SQLiteSubscriptionRouter()
 
         queue = InMemoryFilingQueue()

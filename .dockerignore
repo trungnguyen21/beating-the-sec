@@ -1,0 +1,16 @@
+.git
+.venv
+__pycache__
+*.py[oc]
+.pytest_cache
+.env
+.env.*
+bsec.db
+data/
+docs/
+draft.ipynb
+watchlist.json
+users.json
+tests/
+.vscode
+.claude

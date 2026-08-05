@@ -1,6 +1,3 @@
-PRAGMA foreign_keys = ON;
-PRAGMA journal_mode = WAL;
-
 CREATE TABLE IF NOT EXISTS tickers (
     ticker    TEXT PRIMARY KEY,
     cik       TEXT NOT NULL,
@@ -71,3 +68,14 @@ CREATE TABLE IF NOT EXISTS banned_guilds (
     reason    TEXT,
     banned_at TEXT NOT NULL
 );
+
+-- Columns added after a DB was first created — IF NOT EXISTS keeps this idempotent against a
+-- fresh DB (where init.sql's CREATE TABLE already includes them) as well as an existing one.
+ALTER TABLE earnings_calendar ADD COLUMN IF NOT EXISTS earnings_time TEXT;
+ALTER TABLE tickers ADD COLUMN IF NOT EXISTS is_active INTEGER NOT NULL DEFAULT 0;
+
+-- Backfill: a ticker that already has subscribers should stay pollable rather than silently
+-- going dark the moment this migration runs. Re-running this UPDATE is a no-op once every
+-- subscribed ticker is already active, so it's safe to leave in the idempotent schema script.
+UPDATE tickers SET is_active = 1
+WHERE ticker IN (SELECT DISTINCT ticker FROM subscriptions) AND is_active = 0;
