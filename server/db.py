@@ -320,6 +320,76 @@ async def save_alert(ticker: str, alert: dict) -> None:
         await db.commit()
 
 
+async def get_analysis(ticker: str, accession: str) -> dict | None:
+    """Pre-flight cache lookup for the single-process pipeline (main.py::_process_one) — returns
+    the stored successful analysis for this exact (ticker, accession), or None. Scoped to
+    status = 'ok' only: a prior 'error' row must not count as a cache hit, so a filing that
+    failed transiently (rate limit, network blip) still gets retried on the next delivery of
+    that message instead of being permanently stuck."""
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute(
+            """SELECT alert_json, extraction_json, sentiment_json, risk_json, detected_at
+               FROM filing_analysis
+               WHERE ticker = %s AND accession = %s AND status = 'ok'""",
+            (ticker, accession),
+        )
+        row = await cur.fetchone()
+    if not row:
+        return None
+    return {
+        "alert": json.loads(row[0]),
+        "extraction": json.loads(row[1]) if row[1] else None,
+        "sentiment": json.loads(row[2]) if row[2] else None,
+        "risk": json.loads(row[3]) if row[3] else None,
+        "detected_at": row[4],
+    }
+
+
+async def save_analysis(
+    ticker: str,
+    accession: str,
+    status: str,
+    alert: dict | None = None,
+    extraction: dict | None = None,
+    sentiment: dict | None = None,
+    risk: dict | None = None,
+    error_message: str | None = None,
+    detected_at: str | None = None,
+) -> None:
+    """Upsert the analysis result for (ticker, accession) — success or failure, and regardless
+    of whether the alert is ever delivered to a subscriber (delivery is a separate concern,
+    handled by router.fanout after this is called). ON CONFLICT keeps a redelivered/reprocessed
+    message from producing a duplicate row."""
+    now = datetime.now(timezone.utc).isoformat()
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        await db.execute(
+            """INSERT INTO filing_analysis
+               (id, ticker, accession, status, alert_json, extraction_json, sentiment_json,
+                risk_json, error_message, detected_at, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+               ON CONFLICT (ticker, accession) DO UPDATE SET
+                   status          = excluded.status,
+                   alert_json      = excluded.alert_json,
+                   extraction_json = excluded.extraction_json,
+                   sentiment_json  = excluded.sentiment_json,
+                   risk_json       = excluded.risk_json,
+                   error_message   = excluded.error_message,
+                   detected_at     = excluded.detected_at,
+                   created_at      = excluded.created_at""",
+            (
+                str(uuid.uuid4()), ticker, accession, status,
+                json.dumps(alert) if alert is not None else None,
+                json.dumps(extraction) if extraction is not None else None,
+                json.dumps(sentiment) if sentiment is not None else None,
+                json.dumps(risk) if risk is not None else None,
+                error_message, detected_at, now,
+            ),
+        )
+        await db.commit()
+
+
 async def get_recent_alerts(ticker: str, hours: int = 1) -> list[dict]:
     """Return alerts for ticker detected within the last N hours, newest first."""
     cutoff = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()

@@ -33,6 +33,7 @@ dependencies = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "-m 'not e2e'"
 markers = [
     "e2e: hits a real external service (SEC, Gemini, Kafka, Discord) — requires network/credentials, excluded by default",
 ]
