@@ -6,7 +6,11 @@ services:
       POSTGRES_PASSWORD: bsec
       POSTGRES_DB: beatingthesec
     ports:
-      - "5433:5432"
+      # Bound to loopback only — Docker writes its own iptables rules for published ports that
+      # bypass ufw entirely, so a bare "5433:5432" is reachable from the public internet
+      # regardless of firewall config. 127.0.0.1 keeps it reachable for local `psql`/tooling
+      # (or an `ssh -L` tunnel on a remote host) without exposing it externally.
+      - "127.0.0.1:5433:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -46,15 +50,20 @@ services:
 
   # Gateway bot: /setup, /watch add|remove|list. Guild-agnostic — any server that invites the
   # bot and runs /setup gets its own alert channel, independent of every other server (see
-  # server/db.py's per-guild subscriptions table). DISCORD_DEV_GUILD_ID must be UNSET here so
-  # discord_bot/bot.py's on_ready syncs commands globally instead of to one dev guild.
+  # server/db.py's per-guild subscriptions table).
+  #
+  # DISCORD_BOT_TOKEN and DISCORD_DEV_GUILD_ID both come from .env, deliberately NOT overridden
+  # here — this same file runs both dev (local .env: dev app's token + DISCORD_DEV_GUILD_ID set,
+  # for instant command sync to one test guild) and prod (droplet .env: prod app's token, no
+  # DISCORD_DEV_GUILD_ID, so discord_bot/bot.py's on_ready syncs commands globally). Whichever
+  # bot application's token is in .env determines which bot actually connects — see
+  # docs/DISCORD_INTEGRATION.md's "Dev vs. prod bot" section.
   bot:
     build: .
     command: ["python", "main.py", "--stage", "discord-bot"]
     env_file: .env
     environment:
       DATABASE_URL: postgresql://bsec:bsec@postgres:5432/beatingthesec
-      DISCORD_DEV_GUILD_ID: ""
     depends_on:
       migrate:
         condition: service_completed_successfully
