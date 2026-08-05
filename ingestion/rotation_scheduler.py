@@ -23,7 +23,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import psycopg
 
-from config import DATABASE_URL, DETECTION_BUDGET
+from config import DATABASE_URL, DETECTION_BUDGET, ROTATION_POLL_TIMEOUT_SECONDS
 from ingestion.sec_rss import poll_company_once
 from models.model_detectors import DetectorResult
 from utils.logger import get_logger
@@ -304,8 +304,11 @@ async def run_rotation(
         if batch:
             results = await asyncio.gather(
                 *[
-                    poll_company_once(
-                        company, client, seen_map.setdefault(company["ticker"], set()), max_age_hours
+                    asyncio.wait_for(
+                        poll_company_once(
+                            company, client, seen_map.setdefault(company["ticker"], set()), max_age_hours
+                        ),
+                        timeout=ROTATION_POLL_TIMEOUT_SECONDS,
                     )
                     for company in batch
                 ],
@@ -314,7 +317,10 @@ async def run_rotation(
 
             for company, result in zip(batch, results):
                 if isinstance(result, Exception):
-                    logger.error(f"Rotation poll failed for {company['ticker']}")
+                    logger.error(
+                        f"Rotation poll failed for {company['ticker']}: "
+                        f"{type(result).__name__}: {result}"
+                    )
                     queue.append(company)  # treat like a miss, retry next tick
                 elif result:
                     try:

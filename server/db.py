@@ -1,12 +1,13 @@
 import asyncio
 import json
 import uuid
-from datetime import datetime, timezone, timedelta
+from datetime import date, datetime, timezone, timedelta
 
 import psycopg
 from psycopg_pool import AsyncConnectionPool
 
 from config import DATABASE_URL
+from ingestion.rotation_scheduler import ET, PREMARKET_START
 
 
 class GuildNotSetUpError(Exception):
@@ -180,6 +181,47 @@ async def get_guild_watchlist(guild_id: str) -> list[str]:
             "SELECT ticker FROM subscriptions WHERE user_id = %s ORDER BY ticker", (guild_id,)
         )
         return [r[0] for r in await cur.fetchall()]
+
+
+async def get_upcoming_calendar(hours: float = 24) -> list[dict]:
+    """Every company in earnings_calendar expected to report within the next `hours` (ET) —
+    backs /calendar. Mirrors ingestion/rotation_scheduler.py's CalendarHotSet.upcoming_companies
+    (display-only there too) but async, via the shared pool. Deliberately unscoped by guild
+    watchlist and by tickers.is_active — /calendar is a lookup across the full ~500-ticker
+    calendar universe, not a "what am I subscribed to" view (that's /watch list). Unknown
+    earnings_time falls back to the start of the premarket window for ordering, flagged via
+    "time_known": False."""
+    now_et = datetime.now(ET)
+    horizon = now_et + timedelta(hours=hours)
+    dates = sorted({now_et.date(), horizon.date()})
+
+    placeholders = ",".join(["%s"] * len(dates))
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute(
+            f"""SELECT ec.ticker, t.title, ec.earnings_date, ec.earnings_time
+                FROM earnings_calendar ec
+                JOIN tickers t ON t.ticker = ec.ticker
+                WHERE ec.earnings_date IN ({placeholders})""",
+            tuple(d.isoformat() for d in dates),
+        )
+        rows = await cur.fetchall()
+
+    upcoming = []
+    for ticker, title, date_str, time_str in rows:
+        d = date.fromisoformat(date_str)
+        t = datetime.strptime(time_str, "%H:%M:%S").time() if time_str else PREMARKET_START
+        target = datetime.combine(d, t, tzinfo=ET)
+        if now_et <= target <= horizon:
+            upcoming.append({
+                "ticker": ticker,
+                "title": title,
+                "target": target.isoformat(),
+                "time_known": bool(time_str),
+            })
+
+    upcoming.sort(key=lambda c: c["target"])
+    return upcoming
 
 
 async def delete_user(user_id: str) -> bool:

@@ -18,6 +18,13 @@ DETECTION_BUDGET = 7                  # req/sec reserved for rotation_scheduler.
 FETCH_BUDGET_HEADROOM = 3             # req/sec reserved for fetch_filing_document + backstop poller
 BACKSTOP_POLL_INTERVAL_SECONDS = 45   # low-cadence secondary confirmation via edgar_poller
 
+# Per-company poll budget inside a single rotation tick. asyncio.gather waits for the slowest
+# task in the batch, so one slow/hanging SEC response otherwise stalls every other company in
+# that tick — bounding it here keeps a single company's slowness from dragging down the batch,
+# well below sec_rss.py's own 10s httpx request timeout (that timeout guards the request itself;
+# this one guards the tick's cadence).
+ROTATION_POLL_TIMEOUT_SECONDS = 3.0
+
 LOGGING_LEVEL = logging.INFO
 
 CONSUMER_CONCURRENCY = 4  # max filings processed simultaneously (each uses 3 AI calls)
