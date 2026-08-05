@@ -32,6 +32,29 @@ CREATE TABLE IF NOT EXISTS alerts (
 CREATE INDEX IF NOT EXISTS idx_alerts_ticker_detected ON alerts(ticker, detected_at);
 CREATE INDEX IF NOT EXISTS idx_subscriptions_ticker   ON subscriptions(ticker);
 
+-- Durable record of every filing analysis attempt (success or failure), independent of whether
+-- it was ever delivered to a subscriber — a ticker can have zero subscribers at fanout time and
+-- still get analyzed and logged here. Keyed by (ticker, accession) so a redelivered/reprocessed
+-- filing can be looked up and, on a prior success, reused instead of re-running (paid) AI
+-- analysis. Coexists with `alerts` for now — the Kafka path (pipeline/kafka_consumer.py) still
+-- writes to `alerts` via save_alert until it's migrated to this table in a later pass.
+CREATE TABLE IF NOT EXISTS filing_analysis (
+    id              TEXT PRIMARY KEY,
+    ticker          TEXT NOT NULL,
+    accession       TEXT NOT NULL,
+    status          TEXT NOT NULL,  -- 'ok' | 'error'
+    alert_json      TEXT,
+    extraction_json TEXT,
+    sentiment_json  TEXT,
+    risk_json       TEXT,
+    error_message   TEXT,
+    detected_at     TEXT,
+    created_at      TEXT NOT NULL,
+    UNIQUE (ticker, accession)
+);
+
+CREATE INDEX IF NOT EXISTS idx_filing_analysis_ticker ON filing_analysis(ticker);
+
 -- Daily-refreshed next-earnings-date snapshot, used by ingestion/rotation_scheduler.py's
 -- CalendarHotSet to decide which companies are "hot" today. Nullable earnings_date — a ticker
 -- with no known upcoming date just never enters the hot set, not an error.

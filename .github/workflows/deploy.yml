@@ -1,0 +1,32 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}  # manual trigger — test/redeploy on demand, from any branch, without
+                         # needing a push to main (Actions tab → Deploy → Run workflow)
+
+jobs:
+  test:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to prod droplet
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/beating-sec
+            git fetch origin main
+            git reset --hard origin/main
+            # Schema migration first (idempotent, additive-only) — see db/migrate.py.
+            docker compose run --rm migrate python -m db.migrate
+            # Rebuild + restart every service whose code changed; postgres is untouched since
+            # it has no build context and was already running.
+            docker compose up -d --build
