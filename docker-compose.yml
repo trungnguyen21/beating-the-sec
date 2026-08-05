@@ -1,0 +1,91 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: bsec
+      POSTGRES_PASSWORD: bsec
+      POSTGRES_DB: beatingthesec
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bsec -d beatingthesec"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # One-off: applies db/init.sql and seeds the `tickers` table from watchlist.json, then exits.
+  # Everything else waits on this completing successfully before it starts querying Postgres.
+  migrate:
+    build: .
+    command: ["python", "-m", "db.seed"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://bsec:bsec@postgres:5432/beatingthesec
+    volumes:
+      - ./watchlist.json:/app/watchlist.json:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  # Ingestion + AI analysis + Discord webhook delivery in one process, wired together with an
+  # in-memory queue (pipeline/queue.py's InMemoryFilingQueue) instead of Kafka — see
+  # docs/DEPLOYMENT_PLAN.md. Swap to the ingestion/ai-worker/delivery --stage split (backed by
+  # Kafka) later if this needs to scale beyond one process.
+  pipeline:
+    build: .
+    command: ["python", "main.py"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://bsec:bsec@postgres:5432/beatingthesec
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Gateway bot: /setup, /watch add|remove|list. Guild-agnostic — any server that invites the
+  # bot and runs /setup gets its own alert channel, independent of every other server (see
+  # server/db.py's per-guild subscriptions table). DISCORD_DEV_GUILD_ID must be UNSET here so
+  # discord_bot/bot.py's on_ready syncs commands globally instead of to one dev guild.
+  bot:
+    build: .
+    command: ["python", "main.py", "--stage", "discord-bot"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://bsec:bsec@postgres:5432/beatingthesec
+      DISCORD_DEV_GUILD_ID: ""
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # FastAPI admin dashboard — ticker-universe management, guild visibility, ban/unban.
+  admin:
+    build: .
+    command: ["python", "main.py", "--stage", "server"]
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://bsec:bsec@postgres:5432/beatingthesec
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  # Daily earnings-calendar refresh (db/scheduler_loop.py) — the container-native replacement
+  # for the host crontab entry in docs/DEPLOYMENT_PLAN.md.
+  scheduler:
+    build: .
+    command: ["python", "-m", "db.scheduler_loop"]
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://bsec:bsec@postgres:5432/beatingthesec
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

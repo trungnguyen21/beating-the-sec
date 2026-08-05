@@ -6,9 +6,11 @@ Run once (or any time) to initialise the DB and sync tickers from watchlist.json
 """
 import argparse
 import json
-import sqlite3
 from pathlib import Path
 
+import psycopg
+
+from config import DATABASE_URL
 from db.schema import ensure_schema
 
 ROOT = Path(__file__).parent.parent
@@ -17,7 +19,7 @@ ROOT = Path(__file__).parent.parent
 def _parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser()
     p.add_argument("--watchlist", default=str(ROOT / "watchlist.json"))
-    p.add_argument("--db", default=str(ROOT / "bsec.db"))
+    p.add_argument("--database-url", default=DATABASE_URL)
     return p.parse_args()
 
 
@@ -27,8 +29,7 @@ def main() -> None:
     with open(args.watchlist) as f:
         companies = json.load(f)
 
-    ensure_schema(args.db)
-    conn = sqlite3.connect(args.db)
+    ensure_schema(args.database_url)
 
     rows = [
         (
@@ -38,14 +39,13 @@ def main() -> None:
         )
         for item in companies
     ]
-    conn.executemany(
-        "INSERT OR IGNORE INTO tickers (ticker, cik, title) VALUES (?, ?, ?)",
-        rows,
-    )
-    conn.commit()
-    conn.close()
+    with psycopg.connect(args.database_url, autocommit=True) as conn, conn.cursor() as cur:
+        cur.executemany(
+            "INSERT INTO tickers (ticker, cik, title) VALUES (%s, %s, %s) ON CONFLICT DO NOTHING",
+            rows,
+        )
 
-    print(f"DB ready: {args.db}")
+    print(f"DB ready: {args.database_url}")
     print(f"Tickers seeded: {len(rows)}")
 
 
