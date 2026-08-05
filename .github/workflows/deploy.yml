@@ -25,8 +25,12 @@ jobs:
             cd /opt/beating-sec
             git fetch origin main
             git reset --hard origin/main
-            # Schema migration first (idempotent, additive-only) — see db/migrate.py.
+            # Build images from the freshly-checked-out code first — running `migrate` before
+            # this would use whatever image was built on the *previous* deploy, which doesn't
+            # have this deploy's code (e.g. a brand-new db/migrate.py) yet.
+            docker compose build
+            # Schema migration next (idempotent, additive-only) — see db/migrate.py.
             docker compose run --rm migrate python -m db.migrate
-            # Rebuild + restart every service whose code changed; postgres is untouched since
+            # Restart every service with its freshly-built image; postgres is untouched since
             # it has no build context and was already running.
-            docker compose up -d --build
+            docker compose up -d
