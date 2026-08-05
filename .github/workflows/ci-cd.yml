@@ -1,0 +1,55 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}  # manual trigger — lets you test the deploy job on demand, without
+                         # waiting for a merge to main (Actions tab → this workflow → Run workflow)
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install Python (per pyproject.toml)
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # Default `pytest` invocation already excludes @pytest.mark.e2e via addopts in
+      # pyproject.toml — this only runs the fast, fully-mocked unit tests. e2e tests need live
+      # SEC/Gemini/Confluent/Discord credentials and a reachable Postgres, and are intentionally
+      # not run here — see tests/README.md.
+      - name: Run tests
+        run: uv run pytest -v
+
+  deploy:
+    needs: test
+    if: >-
+      (github.ref == 'refs/heads/main' && github.event_name == 'push') ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to prod droplet
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script: |
+            set -e
+            cd /opt/beating-sec
+            git fetch origin main
+            git reset --hard origin/main
+            # Schema migration first (idempotent, additive-only) — see db/migrate.py.
+            docker compose run --rm migrate python -m db.migrate
+            # Rebuild + restart every service whose code changed; postgres is untouched since
+            # it has no build context and was already running.
+            docker compose up -d --build

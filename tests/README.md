@@ -71,6 +71,15 @@ rotation cycling (every company still gets polled at least once when `detection_
 company count`) and per-company error isolation (one company's forced failure never blocks
 the others in the same tick).
 
+### `test_db_filing_analysis.py`
+Storage-layer tests for `server/db.py`'s `get_analysis`/`save_analysis` (the `filing_analysis`
+table) against a real, live Postgres — no mocking of `psycopg`. Marked `e2e` because it needs a
+reachable DB (`docker compose up -d postgres` + `python -m db.migrate`), not a third-party
+service. Each test uses a unique uuid-suffixed ticker and cleans up its own rows in a fixture
+teardown. Covers: cache miss, round-trip of all JSON fields, upsert-not-duplicate on
+`(ticker, accession)`, `status='error'` rows excluded from cache hits, and a later success
+superseding a prior error.
+
 ### `test_workers.py`
 Hits the real Gemini client — `extraction_worker` / `sentiment_worker` / `risk_worker`
 against fixture press-release text.
