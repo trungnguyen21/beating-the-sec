@@ -11,7 +11,7 @@ from pipeline.dispatcher import analyze_filing
 from aggregator.aggregator import build_alert
 from workers.client import AIClient, GeminiClient
 from delivery.router import SQLiteSubscriptionRouter
-from server.db import get_active_tickers
+from server.db import get_active_tickers, get_analysis, save_analysis
 from config import CONSUMER_CONCURRENCY
 
 from dotenv import load_dotenv
@@ -24,37 +24,74 @@ async def _process_one(msg_id: str, filing, queue: FilingQueue,
     try:
         print(f"📥 Processing: {filing.ticker} {filing.accession}")
 
-        raw_text = filing.raw_text
-        if not raw_text:
-            await queue.ack(msg_id)
-            return
+        # Pre-flight cache check: a prior successful analysis of this exact (ticker, accession)
+        # is reused as-is rather than re-running (paid) AI analysis — e.g. a redelivered queue
+        # message, or the filing being reprocessed after a crash. Still proceeds through
+        # fanout below, in case a prior run saved the analysis but crashed before delivering it.
+        cached = await get_analysis(filing.ticker, filing.accession)
+        persist_coro = None
+        if cached:
+            print(f"♻️  Cache hit: reusing stored analysis for {filing.ticker} {filing.accession}")
+            alert = cached["alert"]
+        else:
+            raw_text = filing.raw_text
+            if not raw_text:
+                await queue.ack(msg_id)
+                return
 
-        clean_text = normalize(raw_text, "html")
+            clean_text = normalize(raw_text, "html")
 
-        if not deduplicator.is_new(clean_text):
-            print(f"⏭  Duplicate skipped: {filing.ticker}")
-            await queue.ack(msg_id)
-            return
+            if not deduplicator.is_new(clean_text):
+                print(f"⏭  Duplicate skipped: {filing.ticker}")
+                await queue.ack(msg_id)
+                return
 
-        sections = split_sections(clean_text)
-        results = await analyze_filing(sections, ai_client, filing.estimates)
+            sections = split_sections(clean_text)
+            results = await analyze_filing(sections, ai_client, filing.estimates)
 
-        alert = build_alert(
-            ticker=filing.ticker,
-            results=results,
-            detected_at=filing.detected_at,
-            filed_at=filing.filed_at,
-            filing_url=filing.index_url,
-        )
+            alert = build_alert(
+                ticker=filing.ticker,
+                results=results,
+                detected_at=filing.detected_at,
+                filed_at=filing.filed_at,
+                filing_url=filing.index_url,
+            )
+
+            persist_coro = save_analysis(
+                ticker=filing.ticker,
+                accession=filing.accession,
+                status="ok",
+                alert=alert,
+                extraction=results.get("extraction"),
+                sentiment=results.get("sentiment"),
+                risk=results.get("risk"),
+                detected_at=filing.detected_at,
+            )
 
         print(f"🚨 Alert: {alert['signal_label']} — {alert['ticker']}")
-        await router.fanout(filing.ticker, alert)
+        # Persist and deliver concurrently — the DB write and the webhook fanout are independent,
+        # so delivery latency shouldn't be serialized behind the DB round-trip. A cache hit has
+        # nothing new to persist (persist_coro stays None), so it's just the fanout.
+        if persist_coro is not None:
+            await asyncio.gather(persist_coro, router.fanout(filing.ticker, alert))
+        else:
+            await router.fanout(filing.ticker, alert)
         await queue.ack(msg_id)
 
     except Exception as e:
         filing_ctx = {"ticker": filing.ticker, "accession": filing.accession, "msg_id": msg_id}
         print(f"Error processing filing {filing_ctx}: {e}")
         print(traceback.format_exc())
+        try:
+            await save_analysis(
+                ticker=filing.ticker,
+                accession=filing.accession,
+                status="error",
+                error_message=str(e),
+                detected_at=getattr(filing, "detected_at", None),
+            )
+        except Exception:
+            print(f"Failed to persist error analysis for {filing_ctx}")
         await queue.ack(msg_id)
 
 
