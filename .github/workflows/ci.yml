@@ -1,0 +1,30 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_call: {}  # lets deploy.yml call this as its test gate, without duplicating steps
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Install Python (per pyproject.toml)
+        run: uv python install
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      # Default `pytest` invocation already excludes @pytest.mark.e2e via addopts in
+      # pyproject.toml — this only runs the fast, fully-mocked unit tests. e2e tests need live
+      # SEC/Gemini/Confluent/Discord credentials and a reachable Postgres, and are intentionally
+      # not run here — see tests/README.md.
+      - name: Run tests
+        run: uv run pytest -v
