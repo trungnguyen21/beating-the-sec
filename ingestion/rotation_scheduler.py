@@ -15,15 +15,15 @@ whatever `hot_set_provider.current_hot_companies()` returns.
 
 import asyncio
 import math
-import sqlite3
 from collections import deque
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Awaitable, Callable, Protocol
 from zoneinfo import ZoneInfo
 
 import httpx
+import psycopg
 
-from config import DB_PATH, DETECTION_BUDGET
+from config import DATABASE_URL, DETECTION_BUDGET
 from ingestion.sec_rss import poll_company_once
 from models.model_detectors import DetectorResult
 from utils.logger import get_logger
@@ -80,7 +80,7 @@ AFTERMARKET_END = time(18, 0)
 
 # Precise per-company window: poll only within this pad of the company's own estimated
 # report time (docs/checklist.md Phase 6d), rather than the whole premarket/aftermarket block.
-TIME_WINDOW_PAD = timedelta(minutes=15)
+TIME_WINDOW_PAD = timedelta(minutes=60)
 
 # Cheap outer short-circuit so CalendarHotSet still costs ~zero outside trading hours: a
 # per-company ±15min window can fall outside the old 6:00-9:30/16:00-18:00 bounds (e.g. a
@@ -135,28 +135,25 @@ class CalendarHotSet:
 
     def __init__(
         self,
-        db_path: str = DB_PATH,
+        database_url: str = DATABASE_URL,
         now_fn: Callable[[], datetime] = None,
         ticker_filter: set[str] | None = None,
     ):
-        self._db_path = db_path
+        self._database_url = database_url
         self._now_fn = now_fn or (lambda: datetime.now(ET))
         self._ticker_filter = ticker_filter
         self._cached_date: date | None = None
         self._cached_companies: list[dict] = []
 
     def _query_hot_companies(self, today: date) -> list[dict]:
-        conn = sqlite3.connect(self._db_path)
-        try:
+        with psycopg.connect(self._database_url) as conn:
             rows = conn.execute(
                 """SELECT ec.ticker, t.cik, t.title, ec.earnings_time
                    FROM earnings_calendar ec
                    JOIN tickers t ON t.ticker = ec.ticker
-                   WHERE ec.earnings_date = ?""",
+                   WHERE ec.earnings_date = %s""",
                 (today.isoformat(),),
             ).fetchall()
-        finally:
-            conn.close()
         companies = [{"ticker": r[0], "cik": r[1], "title": r[2], "earnings_time": r[3]} for r in rows]
         if self._ticker_filter is not None:
             companies = [c for c in companies if c["ticker"] in self._ticker_filter]
@@ -185,9 +182,8 @@ class CalendarHotSet:
         horizon = now_et + timedelta(hours=hours)
         dates = sorted({now_et.date(), horizon.date()})
 
-        conn = sqlite3.connect(self._db_path)
-        try:
-            placeholders = ",".join("?" * len(dates))
+        placeholders = ",".join(["%s"] * len(dates))
+        with psycopg.connect(self._database_url) as conn:
             rows = conn.execute(
                 f"""SELECT ec.ticker, t.title, ec.earnings_date, ec.earnings_time
                     FROM earnings_calendar ec
@@ -195,8 +191,6 @@ class CalendarHotSet:
                     WHERE ec.earnings_date IN ({placeholders})""",
                 tuple(d.isoformat() for d in dates),
             ).fetchall()
-        finally:
-            conn.close()
 
         upcoming = []
         for ticker, title, date_str, time_str in rows:
