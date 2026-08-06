@@ -18,7 +18,7 @@ Two separate Discord applications — never mix tokens.
 | | Bot | Token | Guild(s) | Command sync |
 |---|---|---|---|---|
 | **Dev** (local) | `[TEST]-FinancialsWatcher` | local `.env` | Signal Trading only | instant (`DISCORD_DEV_GUILD_ID` set) |
-| **Prod** (droplet) | `FinancialsWatcher` | droplet `.env` | all real guilds | global, ~1hr propagation |
+| **Prod** (droplet) | `FinancialsWatcher` | droplet `.env` | all real guilds | global, ~1hr propagation | 
 
 Test bot changes locally in Signal Trading first. Never put the prod token in local `.env`.
 
