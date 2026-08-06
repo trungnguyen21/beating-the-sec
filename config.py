@@ -1,28 +1,8 @@
 import logging
 import os
-
-from datetime import time, timedelta
-from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 load_dotenv()
-
-ET = ZoneInfo("America/New_York")
-PREMARKET_START = time(6, 0)
-PREMARKET_END = time(9, 30)
-AFTERMARKET_START = time(16, 0)
-AFTERMARKET_END = time(18, 0)
-
-# Precise per-company window: poll only within this pad of the company's own estimated
-# report time (docs/checklist.md Phase 6d), rather than the whole premarket/aftermarket block.
-TIME_WINDOW_PAD = timedelta(minutes=60)
-
-# Cheap outer short-circuit so CalendarHotSet still costs ~zero outside trading hours: a
-# per-company ±15min window can fall outside the old 6:00-9:30/16:00-18:00 bounds (e.g. a
-# 06:00 ET reporter's window starts at 5:45), so this has to be more generous than those —
-# it only exists to skip the DB query overnight, not to gate which companies are hot.
-OUTER_SHORT_CIRCUIT_START = time(5, 0)
-OUTER_SHORT_CIRCUIT_END = time(19, 0)
 
 HEADERS = {
     "User-Agent": "BSEC example@email.com",  # REQUIRED by SEC

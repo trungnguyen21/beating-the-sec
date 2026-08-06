@@ -16,14 +16,14 @@ whatever `hot_set_provider.current_hot_companies()` returns.
 import asyncio
 import math
 from collections import deque
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Awaitable, Callable, Protocol
+from zoneinfo import ZoneInfo
 
 import httpx
 import psycopg
 
 from config import DATABASE_URL, DETECTION_BUDGET, ROTATION_POLL_TIMEOUT_SECONDS
-from config import OUTER_SHORT_CIRCUIT_END, OUTER_SHORT_CIRCUIT_START, PREMARKET_START, PREMARKET_END, AFTERMARKET_START, AFTERMARKET_END, TIME_WINDOW_PAD, ET
 from ingestion.sec_rss import poll_company_once
 from models.model_detectors import DetectorResult
 from utils.logger import get_logger
@@ -72,6 +72,24 @@ class CooldownAwareHotSet:
         ]
 
 
+ET = ZoneInfo("America/New_York")
+PREMARKET_START = time(6, 0)
+PREMARKET_END = time(9, 30)
+AFTERMARKET_START = time(16, 0)
+AFTERMARKET_END = time(18, 0)
+
+# Precise per-company window: poll only within this pad of the company's own estimated
+# report time (docs/checklist.md Phase 6d), rather than the whole premarket/aftermarket block.
+TIME_WINDOW_PAD = timedelta(minutes=60)
+
+# Cheap outer short-circuit so CalendarHotSet still costs ~zero outside trading hours: a
+# per-company ±15min window can fall outside the old 6:00-9:30/16:00-18:00 bounds (e.g. a
+# 06:00 ET reporter's window starts at 5:45), so this has to be more generous than those —
+# it only exists to skip the DB query overnight, not to gate which companies are hot.
+OUTER_SHORT_CIRCUIT_START = time(5, 0)
+OUTER_SHORT_CIRCUIT_END = time(19, 0)
+
+
 def _maybe_active_now(now_et: datetime) -> bool:
     t = now_et.time()
     return OUTER_SHORT_CIRCUIT_START <= t <= OUTER_SHORT_CIRCUIT_END
@@ -113,13 +131,6 @@ class CalendarHotSet:
     Without it, every company in the DB reporting earnings today is hot — including ones
     nobody is actually subscribed to, which wastes SEC request budget on companies nobody
     cares about. `run_watcher` passes its `watchlist` param here for exactly that reason.
-
-    `cache_ttl` bounds how stale the underlying "who's reporting today" query can get — this
-    instance lives for the lifetime of the pipeline process (run_watcher builds one and hands
-    it to run_rotation, which loops forever), so without a TTL a same-day db/refresh_calendar.py
-    run would never be picked up until the calendar date itself rolled over. Re-querying is
-    cheap (small table, once per TTL window, not per tick) — the per-tick live behavior
-    (_in_company_window filtering below) is unaffected either way.
     """
 
     def __init__(
@@ -127,14 +138,11 @@ class CalendarHotSet:
         database_url: str = DATABASE_URL,
         now_fn: Callable[[], datetime] = None,
         ticker_filter: set[str] | None = None,
-        cache_ttl: timedelta = timedelta(minutes=5),
     ):
         self._database_url = database_url
         self._now_fn = now_fn or (lambda: datetime.now(ET))
         self._ticker_filter = ticker_filter
-        self._cache_ttl = cache_ttl
         self._cached_date: date | None = None
-        self._cached_at: datetime | None = None
         self._cached_companies: list[dict] = []
 
     def _query_hot_companies(self, today: date) -> list[dict]:
@@ -158,11 +166,9 @@ class CalendarHotSet:
             return []
 
         today = now_et.date()
-        stale = self._cached_at is None or (now_et - self._cached_at) >= self._cache_ttl
-        if today != self._cached_date or stale:
+        if today != self._cached_date:
             self._cached_companies = self._query_hot_companies(today)
             self._cached_date = today
-            self._cached_at = now_et
 
         return [c for c in self._cached_companies if _in_company_window(now_et, c["earnings_time"])]
 
