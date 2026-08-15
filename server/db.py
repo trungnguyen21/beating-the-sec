@@ -408,7 +408,8 @@ async def get_recent_alerts(ticker: str, hours: int = 1) -> list[dict]:
 # --- Bot visibility + ban/unban kill switch --------------------------------
 
 async def log_command(
-    guild_id: str | None, discord_user_id: str, command: str, args: str, success: bool
+    guild_id: str | None, discord_user_id: str, command: str, args: str, success: bool,
+    duration_ms: int = 0,
 ) -> None:
     """One row per slash-command invocation — the only source for "active users" and "commands
     per day", neither of which is derivable from current-state tables. Called from a single
@@ -418,11 +419,127 @@ async def log_command(
     async with pool.connection() as db:
         await db.execute(
             """INSERT INTO bot_command_log
-               (id, guild_id, discord_user_id, command, args, success, created_at)
-               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
-            (str(uuid.uuid4()), guild_id, discord_user_id, command, args, 1 if success else 0, now),
+               (id, guild_id, discord_user_id, command, args, success, duration_ms, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s)""",
+            (str(uuid.uuid4()), guild_id, discord_user_id, command, args, 1 if success else 0, duration_ms, now),
         )
         await db.commit()
+
+
+async def log_api_request(method: str, path: str, status_code: int, duration_ms: int) -> None:
+    now = datetime.now(timezone.utc).isoformat()
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        await db.execute(
+            """INSERT INTO api_request_log (id, method, path, status_code, duration_ms, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s)""",
+            (str(uuid.uuid4()), method, path, status_code, duration_ms, now),
+        )
+        await db.commit()
+
+
+# Whitelist of valid granularities → (bucket SQL using alias `ts`, default window)
+# The `ts` alias is defined in a CTE so the expression is safe to interpolate.
+_GRAN: dict[str, tuple[str, timedelta]] = {
+    "5min":  (
+        "date_trunc('hour', ts) + INTERVAL '5 minutes' * (EXTRACT(MINUTE FROM ts)::int / 5)",
+        timedelta(hours=6),
+    ),
+    "15min": (
+        "date_trunc('hour', ts) + INTERVAL '15 minutes' * (EXTRACT(MINUTE FROM ts)::int / 15)",
+        timedelta(hours=24),
+    ),
+    "1h":    ("date_trunc('hour', ts)",  timedelta(hours=48)),
+    "3h":    (
+        "date_trunc('hour', ts) - MAKE_INTERVAL(hours => EXTRACT(HOUR FROM ts)::int %% 3)",
+        timedelta(days=7),
+    ),
+    "day":   ("date_trunc('day', ts)",   timedelta(days=30)),
+}
+
+
+async def get_api_stats(granularity: str = "1h") -> dict:
+    """API request counts per bucket and avg/p95 latency per endpoint."""
+    bucket_sql, window = _GRAN.get(granularity, _GRAN["1h"])
+    since = (datetime.now(timezone.utc) - window).isoformat()
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute(
+            f"""WITH d AS (
+                    SELECT CAST(created_at AS TIMESTAMPTZ) AS ts
+                    FROM api_request_log WHERE created_at >= %s
+                )
+                SELECT {bucket_sql} AS bucket, COUNT(*)
+                FROM d GROUP BY bucket ORDER BY bucket""",
+            (since,),
+        )
+        by_day = [{"day": r[0].isoformat(), "count": r[1]} for r in await cur.fetchall()]
+
+        cur = await db.execute(
+            """SELECT method, path,
+                      COUNT(*) AS total,
+                      ROUND(AVG(duration_ms)) AS avg_ms,
+                      PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_ms
+               FROM api_request_log
+               WHERE created_at >= %s
+               GROUP BY method, path
+               ORDER BY total DESC""",
+            (since,),
+        )
+        by_endpoint = [
+            {
+                "endpoint": f"{r[0]} {r[1]}",
+                "total": r[2],
+                "avg_ms": float(r[3]) if r[3] is not None else 0.0,
+                "p95_ms": float(r[4]) if r[4] is not None else 0.0,
+            }
+            for r in await cur.fetchall()
+        ]
+
+    return {"by_day": by_day, "by_endpoint": by_endpoint}
+
+
+async def get_command_stats(granularity: str = "1h") -> dict:
+    """Chart data for the /admin/stats page: bucketed command counts and per-command latency."""
+    bucket_sql, window = _GRAN.get(granularity, _GRAN["1h"])
+    since = (datetime.now(timezone.utc) - window).isoformat()
+    pool = await _get_pool()
+    async with pool.connection() as db:
+        cur = await db.execute(
+            f"""WITH d AS (
+                    SELECT CAST(created_at AS TIMESTAMPTZ) AS ts
+                    FROM bot_command_log WHERE created_at >= %s
+                )
+                SELECT {bucket_sql} AS bucket, COUNT(*)
+                FROM d GROUP BY bucket ORDER BY bucket""",
+            (since,),
+        )
+        by_day = [{"day": r[0].isoformat(), "count": r[1]} for r in await cur.fetchall()]
+
+        cur = await db.execute(
+            """SELECT command,
+                      COUNT(*) AS total,
+                      ROUND(AVG(duration_ms)) AS avg_ms,
+                      PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_ms,
+                      SUM(CASE WHEN success = 0 THEN 1 ELSE 0 END) AS failures
+               FROM bot_command_log
+               WHERE created_at >= %s AND duration_ms IS NOT NULL
+               GROUP BY command
+               ORDER BY avg_ms DESC NULLS LAST""",
+            (since,),
+        )
+        by_command = [
+            {
+                "command": r[0],
+                "total": r[1],
+                "avg_ms": float(r[2]) if r[2] is not None else 0.0,
+                "p95_ms": float(r[3]) if r[3] is not None else 0.0,
+                "failures": r[4],
+            }
+            for r in await cur.fetchall()
+        ]
+
+    return {"by_day": by_day, "by_command": by_command}
 
 
 async def is_guild_banned(guild_id: str) -> bool:
