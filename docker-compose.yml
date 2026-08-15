@@ -69,7 +69,7 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # FastAPI admin dashboard — ticker-universe management, guild visibility, ban/unban.
+  # FastAPI admin dashboard — ticker-universe management, guild visibility, ban/unban, stats.
   admin:
     build: .
     command: ["python", "main.py", "--stage", "server"]
@@ -78,6 +78,10 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql://bsec:bsec@postgres:5432/beatingthesec
+    volumes:
+      # Read-only socket mount — needed for /admin/logs/stream (docker logs -f).
+      # :ro prevents the admin process from starting/stopping containers even if compromised.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
     depends_on:
       migrate:
         condition: service_completed_successfully

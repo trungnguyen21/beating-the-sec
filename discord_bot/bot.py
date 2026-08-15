@@ -4,6 +4,7 @@ Gateway bot serving /setup and /watch add|remove|list — see docs/DISCORD_INTEG
 full design rationale. Guild-broadcast only: an admin picks a channel, curates the server's
 watchlist, and every member in that channel sees every alert. No per-member personalization.
 """
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -43,14 +44,16 @@ async def _tracked(interaction: discord.Interaction, command: str, args: str):
     guild_id = str(interaction.guild_id) if interaction.guild_id else None
     user_id = str(interaction.user.id)
     success = True
+    start = time.perf_counter()
     try:
         yield
     except Exception:
         success = False
         raise
     finally:
+        duration_ms = int((time.perf_counter() - start) * 1000)
         try:
-            await log_command(guild_id, user_id, command, args, success)
+            await log_command(guild_id, user_id, command, args, success, duration_ms)
         except Exception:
             logger.exception("Failed to log Discord command")
 
