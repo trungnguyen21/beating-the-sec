@@ -96,6 +96,18 @@ CREATE TABLE IF NOT EXISTS banned_guilds (
 -- fresh DB (where init.sql's CREATE TABLE already includes them) as well as an existing one.
 ALTER TABLE earnings_calendar ADD COLUMN IF NOT EXISTS earnings_time TEXT;
 ALTER TABLE tickers ADD COLUMN IF NOT EXISTS is_active INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE bot_command_log ADD COLUMN IF NOT EXISTS duration_ms INTEGER;
+
+CREATE TABLE IF NOT EXISTS api_request_log (
+    id          TEXT PRIMARY KEY,
+    method      TEXT NOT NULL,
+    path        TEXT NOT NULL,
+    status_code INTEGER NOT NULL,
+    duration_ms INTEGER NOT NULL,
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_api_request_log_created ON api_request_log(created_at);
+CREATE INDEX IF NOT EXISTS idx_api_request_log_path    ON api_request_log(path);
 
 -- Backfill: a ticker that already has subscribers should stay pollable rather than silently
 -- going dark the moment this migration runs. Re-running this UPDATE is a no-op once every
