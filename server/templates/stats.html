@@ -1,0 +1,276 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>BSEC Stats</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4/dist/chart.umd.min.js"></script>
+  <style>
+    body { font-family: sans-serif; max-width: 980px; margin: 2rem auto; padding: 0 1rem; }
+    h1 { margin-bottom: .25rem; }
+    h2 { margin-top: 2.5rem; margin-bottom: .75rem; border-bottom: 1px solid #ddd; padding-bottom: .3rem; }
+    h3 { margin: 0 0 .75rem; font-size: 1rem; color: #444; }
+    a.back { display: inline-block; margin-bottom: 1.5rem; }
+    .controls { margin: 1.25rem 0; display: flex; align-items: center; gap: 1rem; flex-wrap: wrap; font-size: .9rem; }
+    .controls span { color: #888; font-size: .82rem; }
+    .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 1.25rem; }
+    @media (max-width: 640px) { .charts { grid-template-columns: 1fr; } }
+    .chart-box { border: 1px solid #ddd; border-radius: 6px; padding: 1rem; }
+    canvas { width: 100% !important; }
+    table { border-collapse: collapse; width: 100%; margin-top: 1rem; font-size: .88rem; }
+    th, td { border: 1px solid #ddd; padding: .35rem .6rem; text-align: left; }
+    th { background: #f4f4f4; }
+    .log-section { margin-top: 2rem; }
+    .log-controls { display: flex; gap: .75rem; align-items: center; flex-wrap: wrap; margin-bottom: .5rem; }
+    .log-controls select, .log-controls button { font-size: .9rem; padding: .3rem .6rem; cursor: pointer; }
+    #log-output {
+      background: #111; color: #d4d4d4;
+      font-family: monospace; font-size: .78rem;
+      padding: .75rem; border-radius: 4px;
+      max-height: 440px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-all;
+    }
+    #log-status { font-size: .8rem; color: #888; margin-left: .25rem; }
+  </style>
+</head>
+<body>
+
+<a class="back" href="/admin">← Back to Admin</a>
+<h1>Stats &amp; Logs</h1>
+
+<div class="controls">
+  <strong>Granularity:</strong>
+  <label><input type="radio" name="gran" value="5min"> 5 min</label>
+  <label><input type="radio" name="gran" value="15min"> 15 min</label>
+  <label><input type="radio" name="gran" value="1h" checked> 1 hour</label>
+  <label><input type="radio" name="gran" value="3h"> 3 hours</label>
+  <label><input type="radio" name="gran" value="day"> Day</label>
+</div>
+<div class="controls" style="margin-top:.5rem">
+  <strong>Auto-refresh:</strong>
+  <label><input type="radio" name="interval" value="5"> 5s</label>
+  <label><input type="radio" name="interval" value="10"> 10s</label>
+  <label><input type="radio" name="interval" value="30" checked> 30s</label>
+  <label><input type="radio" name="interval" value="0"> Off</label>
+  <span id="next-refresh"></span>
+</div>
+
+<!-- ── Combined activity charts ─────────────────────────────────────────── -->
+<h2>Activity <small id="activity-window" style="font-weight:normal;font-size:.8rem;color:#888">(last 48 hours)</small></h2>
+<div class="charts">
+  <div class="chart-box">
+    <h3>Calls per hour</h3>
+    <canvas id="combined-day-chart"></canvas>
+  </div>
+  <div class="chart-box">
+    <h3>Avg latency by endpoint / command (ms)</h3>
+    <canvas id="combined-lat-chart"></canvas>
+  </div>
+</div>
+
+<!-- ── Breakdown table ───────────────────────────────────────────────────── -->
+<h2>Breakdown</h2>
+<table id="breakdown-table">
+  <thead><tr><th>Endpoint / Command</th><th>Total</th><th>Avg ms</th><th>p95 ms</th></tr></thead>
+  <tbody></tbody>
+</table>
+
+<!-- ── Container logs ────────────────────────────────────────────────────── -->
+<div class="log-section">
+  <h2>Container Logs</h2>
+  <div class="log-controls">
+    <select id="container-select">
+      {% for c in allowed_containers %}
+      <option value="{{ c }}">{{ c }}</option>
+      {% endfor %}
+    </select>
+    <button id="log-start">Start</button>
+    <button id="log-stop" disabled>Stop</button>
+    <span id="log-status">idle</span>
+  </div>
+  <div id="log-output"></div>
+</div>
+
+<script>
+  // ── Granularity state ────────────────────────────────────────────────────
+  let currentGran = '1h';
+
+  const _GRAN_WINDOWS = {
+    '5min': 'last 6 hours', '15min': 'last 24 hours',
+    '1h': 'last 48 hours',  '3h': 'last 7 days', 'day': 'last 30 days',
+  };
+
+  function formatBucketLabel(isoStr, gran) {
+    const d = new Date(isoStr);
+    const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
+    const dd = String(d.getUTCDate()).padStart(2, '0');
+    const hh = String(d.getUTCHours()).padStart(2, '0');
+    const min = String(d.getUTCMinutes()).padStart(2, '0');
+    if (gran === 'day')  return `${mm}/${dd}`;
+    if (gran === '3h' || gran === '1h') return `${mm}/${dd} ${hh}:00`;
+    return `${mm}/${dd} ${hh}:${min}`;
+  }
+
+  // ── Initial data (server-rendered) ───────────────────────────────────────
+  const initial = {
+    api: {{ api_stats | tojson }},
+    discord: {{ discord_stats | tojson }},
+  };
+
+  // ── Merge by-bucket arrays onto a unified time axis ──────────────────────
+  function mergeByDay(apiByDay, dcByDay) {
+    const keys = [...new Set([...apiByDay.map(r => r.day), ...dcByDay.map(r => r.day)])].sort();
+    const apiMap = Object.fromEntries(apiByDay.map(r => [r.day, r.count]));
+    const dcMap  = Object.fromEntries(dcByDay.map(r => [r.day, r.count]));
+    return {
+      keys,
+      labels: keys.map(k => formatBucketLabel(k, currentGran)),
+      apiCounts: keys.map(k => apiMap[k] ?? 0),
+      dcCounts:  keys.map(k => dcMap[k]  ?? 0),
+    };
+  }
+
+  // ── Charts ────────────────────────────────────────────────────────────────
+  const dayChart = new Chart(document.getElementById('combined-day-chart').getContext('2d'), {
+    type: 'line',
+    data: {
+      labels: [],
+      datasets: [
+        { label: 'Total calls', data: [], borderColor: '#4f86c6', backgroundColor: '#4f86c618',
+          tension: 0.3, fill: true, pointRadius: 3 },
+      ]
+    },
+    options: {
+      responsive: true,
+      plugins: { legend: { display: false } },
+      scales: { y: { beginAtZero: true, ticks: { precision: 0 } } }
+    }
+  });
+
+  const latChart = new Chart(document.getElementById('combined-lat-chart').getContext('2d'), {
+    type: 'bar',
+    data: {
+      labels: [],
+      datasets: [
+        { label: 'Avg ms', data: [], backgroundColor: [] },
+        { label: 'p95 ms', data: [], backgroundColor: [] },
+      ]
+    },
+    options: {
+      responsive: true,
+      indexAxis: 'y',
+      plugins: { legend: { position: 'bottom' } },
+      scales: { x: { beginAtZero: true } }
+    }
+  });
+
+  // ── Apply data ────────────────────────────────────────────────────────────
+  function applyData(api, dc) {
+    const merged = mergeByDay(api.by_day, dc.by_day);
+    dayChart.data.labels = merged.labels;
+    dayChart.data.datasets[0].data = merged.labels.map((_, i) => merged.apiCounts[i] + merged.dcCounts[i]);
+    dayChart.update();
+
+    const apiRows = api.by_endpoint.map(r => ({ label: r.endpoint, avg: r.avg_ms, p95: r.p95_ms, total: r.total, type: 'api', failures: null }));
+    const dcRows  = dc.by_command.map(r  => ({ label: r.command,   avg: r.avg_ms, p95: r.p95_ms, total: r.total, type: 'discord', failures: r.failures }));
+    const all = [...apiRows, ...dcRows].sort((a, b) => b.avg - a.avg);
+
+    latChart.data.labels = all.map(r => r.label);
+    latChart.data.datasets[0].data = all.map(r => r.avg);
+    latChart.data.datasets[1].data = all.map(r => r.p95);
+    latChart.data.datasets[0].backgroundColor = '#4f86c6';
+    latChart.data.datasets[1].backgroundColor = '#4f86c644';
+    latChart.update();
+
+    const tbody = document.querySelector('#breakdown-table tbody');
+    tbody.innerHTML = '';
+    for (const r of all) {
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td>${r.label}</td><td>${r.total}</td><td>${Math.round(r.avg)}</td><td>${Math.round(r.p95)}</td>`;
+      tbody.appendChild(tr);
+    }
+  }
+
+  applyData(initial.api, initial.discord);
+
+  // ── Auto-refresh ─────────────────────────────────────────────────────────
+  let refreshTimer = null, countdown = null;
+  const nextRefreshEl = document.getElementById('next-refresh');
+
+  async function fetchAndApply() {
+    try {
+      const resp = await fetch(`/admin/stats/data?granularity=${currentGran}`);
+      if (!resp.ok) return;
+      const data = await resp.json();
+      applyData(data.api, data.discord);
+    } catch (_) {}
+  }
+
+  function startRefresh(seconds) {
+    clearInterval(refreshTimer);
+    clearInterval(countdown);
+    nextRefreshEl.textContent = '';
+    if (seconds === 0) return;
+    let rem = seconds;
+    nextRefreshEl.textContent = `next refresh in ${rem}s`;
+    countdown = setInterval(() => {
+      rem--;
+      nextRefreshEl.textContent = rem > 0 ? `next refresh in ${rem}s` : '';
+      if (rem <= 0) rem = seconds;
+    }, 1000);
+    refreshTimer = setInterval(async () => { rem = seconds; await fetchAndApply(); }, seconds * 1000);
+  }
+
+  document.querySelectorAll('input[name=gran]').forEach(r =>
+    r.addEventListener('change', async () => {
+      currentGran = r.value;
+      document.getElementById('activity-window').textContent = `(${_GRAN_WINDOWS[currentGran]})`;
+      await fetchAndApply();
+    })
+  );
+
+  document.querySelectorAll('input[name=interval]').forEach(r =>
+    r.addEventListener('change', () => startRefresh(parseInt(r.value)))
+  );
+  startRefresh(30);
+
+  // ── SSE log streaming ─────────────────────────────────────────────────────
+  let es = null;
+  const logOut    = document.getElementById('log-output');
+  const logStatus = document.getElementById('log-status');
+  const startBtn  = document.getElementById('log-start');
+  const stopBtn   = document.getElementById('log-stop');
+  const containerSel = document.getElementById('container-select');
+
+  function appendLog(text) {
+    const atBottom = logOut.scrollHeight - logOut.scrollTop <= logOut.clientHeight + 40;
+    logOut.textContent += text + '\n';
+    if (atBottom) logOut.scrollTop = logOut.scrollHeight;
+    const lines = logOut.textContent.split('\n');
+    if (lines.length > 2100) logOut.textContent = lines.slice(-2000).join('\n');
+  }
+
+  function stopStream() {
+    if (es) { es.close(); es = null; }
+    logStatus.textContent = 'stopped';
+    startBtn.disabled = false;
+    stopBtn.disabled = true;
+  }
+
+  startBtn.addEventListener('click', () => {
+    stopStream();
+    logOut.textContent = '';
+    logStatus.textContent = 'connecting…';
+    startBtn.disabled = true;
+    stopBtn.disabled = false;
+    es = new EventSource(`/admin/logs/stream?container=${encodeURIComponent(containerSel.value)}`);
+    es.onopen = () => { logStatus.textContent = 'streaming'; };
+    es.onmessage = e => { appendLog(e.data); };
+    es.onerror = () => { logStatus.textContent = 'connection lost — retrying…'; };
+  });
+
+  stopBtn.addEventListener('click', stopStream);
+  window.addEventListener('beforeunload', stopStream);
+</script>
+</body>
+</html>
