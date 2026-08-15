@@ -1,7 +1,7 @@
 import secrets
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Form, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import Body, Depends, FastAPI, HTTPException, Request, Form, status
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
@@ -9,8 +9,13 @@ from typing import Annotated
 
 from config import ADMIN_PASSWORD, ADMIN_USERNAME
 from server.db import (
+    GuildNotSetUpError,
     get_all_tickers,
     get_bot_stats,
+    get_upcoming_calendar,
+    get_guild_watchlist,
+    add_guild_tickers,
+    remove_guild_tickers,
     list_guilds,
     ban_guild,
     unban_guild,
@@ -117,3 +122,58 @@ async def admin_unban_guild(
 ):
     await unban_guild(guild_id)
     return RedirectResponse("/admin", status_code=status.HTTP_303_SEE_OTHER)
+
+
+# --- Public API endpoints ---------------------------------------------------
+# Mirror the Discord slash commands as REST endpoints so guilds can be managed
+# programmatically without going through the bot. /setup is intentionally excluded
+# (webhook creation requires the Discord API, not just a DB write).
+
+@app.get("/api/calendar")
+async def api_calendar(hours: float = 24):
+    """Upcoming earnings reports. Default window: next 24h. Max: 168h (7 days)."""
+    hours = min(hours, 168)
+    return await get_upcoming_calendar(hours)
+
+
+@app.get("/api/guilds/{guild_id}/watch")
+async def api_watch_list(guild_id: str):
+    """Return the ticker watchlist for a guild."""
+    return await get_guild_watchlist(guild_id)
+
+
+@app.post("/api/guilds/{guild_id}/watch/add")
+async def api_watch_add(
+    guild_id: str,
+    tickers: Annotated[list[str], Body(embed=True)],
+):
+    """
+    Add tickers to a guild's watchlist.
+
+    Body: `{"tickers": ["NVDA", "MSFT"]}`
+
+    Returns which tickers were added, already watched, or unknown.
+    """
+    try:
+        return await add_guild_tickers(guild_id, tickers)
+    except GuildNotSetUpError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+
+
+@app.post("/api/guilds/{guild_id}/watch/remove")
+async def api_watch_remove(
+    guild_id: str,
+    tickers: Annotated[list[str], Body(embed=True)],
+):
+    """
+    Remove tickers from a guild's watchlist.
+
+    Body: `{"tickers": ["NVDA"]}`
+
+    Returns the list of tickers actually removed.
+    """
+    try:
+        removed = await remove_guild_tickers(guild_id, tickers)
+        return {"removed": removed}
+    except GuildNotSetUpError as e:
+        raise HTTPException(status_code=409, detail=str(e))
