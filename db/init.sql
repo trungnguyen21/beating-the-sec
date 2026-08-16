@@ -108,6 +108,11 @@ CREATE TABLE IF NOT EXISTS api_request_log (
 );
 CREATE INDEX IF NOT EXISTS idx_api_request_log_created ON api_request_log(created_at);
 CREATE INDEX IF NOT EXISTS idx_api_request_log_path    ON api_request_log(path);
+-- Functional indexes for the substr-based bucket queries (immutable, unlike CAST to TIMESTAMPTZ)
+CREATE INDEX IF NOT EXISTS idx_api_request_log_hour ON api_request_log (substr(created_at, 1, 13));
+CREATE INDEX IF NOT EXISTS idx_api_request_log_day  ON api_request_log (substr(created_at, 1, 10));
+CREATE INDEX IF NOT EXISTS idx_bot_command_log_hour ON bot_command_log (substr(created_at, 1, 13));
+CREATE INDEX IF NOT EXISTS idx_bot_command_log_day  ON bot_command_log (substr(created_at, 1, 10));
 
 -- Backfill: a ticker that already has subscribers should stay pollable rather than silently
 -- going dark the moment this migration runs. Re-running this UPDATE is a no-op once every
