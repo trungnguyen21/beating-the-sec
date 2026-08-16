@@ -1,7 +1,11 @@
 import asyncio
 import json
+import re
 import uuid
+from collections import deque
 from datetime import date, datetime, timezone, timedelta
+
+_PATH_ID_RE = re.compile(r"/\d{6,}")
 
 import psycopg
 from psycopg_pool import AsyncConnectionPool
@@ -183,6 +187,10 @@ async def get_guild_watchlist(guild_id: str) -> list[str]:
         return [r[0] for r in await cur.fetchall()]
 
 
+_calendar_cache: dict[float, tuple[list, datetime]] = {}
+_CALENDAR_TTL = 60.0  # seconds — safe since the scheduler only refreshes once a day
+
+
 async def get_upcoming_calendar(hours: float = 24) -> list[dict]:
     """Every company in earnings_calendar expected to report within the next `hours` (ET) —
     backs /calendar. Mirrors ingestion/rotation_scheduler.py's CalendarHotSet.upcoming_companies
@@ -191,6 +199,13 @@ async def get_upcoming_calendar(hours: float = 24) -> list[dict]:
     calendar universe, not a "what am I subscribed to" view (that's /watch list). Unknown
     earnings_time falls back to the start of the premarket window for ordering, flagged via
     "time_known": False."""
+    now_utc = datetime.now(timezone.utc)
+    cached = _calendar_cache.get(hours)
+    if cached is not None:
+        result, cached_at = cached
+        if (now_utc - cached_at).total_seconds() < _CALENDAR_TTL:
+            return result
+
     now_et = datetime.now(ET)
     horizon = now_et + timedelta(hours=hours)
     dates = sorted({now_et.date(), horizon.date()})
@@ -221,6 +236,7 @@ async def get_upcoming_calendar(hours: float = 24) -> list[dict]:
             })
 
     upcoming.sort(key=lambda c: c["target"])
+    _calendar_cache[hours] = (upcoming, now_utc)
     return upcoming
 
 
@@ -426,22 +442,72 @@ async def log_command(
         await db.commit()
 
 
-async def log_api_request(method: str, path: str, status_code: int, duration_ms: int) -> None:
-    now = datetime.now(timezone.utc).isoformat()
-    pool = await _get_pool()
-    async with pool.connection() as db:
-        await db.execute(
-            """INSERT INTO api_request_log (id, method, path, status_code, duration_ms, created_at)
-               VALUES (%s, %s, %s, %s, %s, %s)""",
-            (str(uuid.uuid4()), method, path, status_code, duration_ms, now),
-        )
-        await db.commit()
+# In-memory buffer — rows accumulate here and are flushed to Postgres in one
+# batch every 5 seconds by flush_api_log_loop(). This collapses hundreds of
+# individual INSERT+COMMIT calls/second (brutal under load) into one
+# executemany per flush interval, cutting WAL pressure dramatically.
+_api_log_buffer: deque = deque()
 
 
-# Whitelist of valid granularities → (bucket SQL using alias `ts`, default window)
-# The `ts` alias is defined in a CTE so the expression is safe to interpolate.
-_GRAN: dict[str, tuple[str, timedelta]] = {
-    "5min":  (
+def log_api_request(method: str, path: str, status_code: int, duration_ms: int) -> None:
+    """Append one row to the in-memory buffer. Synchronous — no DB call here."""
+    normalized_path = _PATH_ID_RE.sub("/{id}", path)
+    _api_log_buffer.append((
+        str(uuid.uuid4()), method, normalized_path, status_code, duration_ms,
+        datetime.now(timezone.utc).isoformat(),
+    ))
+
+
+async def flush_api_log_loop(interval: float = 5.0) -> None:
+    """Background task started by the FastAPI lifespan. Drains the buffer into
+    Postgres every `interval` seconds in a single batched executemany.
+    Also prunes rows older than 7 days every ~5 minutes to keep the table bounded."""
+    prune_counter = 0
+    while True:
+        await asyncio.sleep(interval)
+        if _api_log_buffer:
+            rows = []
+            while _api_log_buffer:
+                rows.append(_api_log_buffer.popleft())
+            try:
+                pool = await _get_pool()
+                async with pool.connection() as db:
+                    await db.executemany(
+                        """INSERT INTO api_request_log
+                           (id, method, path, status_code, duration_ms, created_at)
+                           VALUES (%s, %s, %s, %s, %s, %s)""",
+                        rows,
+                    )
+                    await db.commit()
+            except Exception:
+                _api_log_buffer.extendleft(reversed(rows))
+
+        prune_counter += 1
+        if prune_counter >= 60:  # every ~5 min
+            prune_counter = 0
+            cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+            try:
+                pool = await _get_pool()
+                async with pool.connection() as db:
+                    await db.execute(
+                        "DELETE FROM api_request_log WHERE created_at < %s", (cutoff,)
+                    )
+                    await db.commit()
+            except Exception:
+                pass
+
+
+# Granularities that can use simple substr() on the TEXT created_at column —
+# these hit the existing text index directly with no casting overhead.
+_GRAN_SUBSTR: dict[str, tuple[int, timedelta]] = {
+    "1h":  (13, timedelta(hours=48)),   # "YYYY-MM-DDTHH"
+    "day": (10, timedelta(days=30)),    # "YYYY-MM-DD"
+}
+
+# Granularities that need CAST + date_trunc — use the functional index on
+# CAST(created_at AS TIMESTAMPTZ) added by the latest db/init.sql migration.
+_GRAN_CAST: dict[str, tuple[str, timedelta]] = {
+    "5min": (
         "date_trunc('hour', ts) + INTERVAL '5 minutes' * (EXTRACT(MINUTE FROM ts)::int / 5)",
         timedelta(hours=6),
     ),
@@ -449,40 +515,86 @@ _GRAN: dict[str, tuple[str, timedelta]] = {
         "date_trunc('hour', ts) + INTERVAL '15 minutes' * (EXTRACT(MINUTE FROM ts)::int / 15)",
         timedelta(hours=24),
     ),
-    "1h":    ("date_trunc('hour', ts)",  timedelta(hours=48)),
-    "3h":    (
+    "3h": (
         "date_trunc('hour', ts) - MAKE_INTERVAL(hours => EXTRACT(HOUR FROM ts)::int %% 3)",
         timedelta(days=7),
     ),
-    "day":   ("date_trunc('day', ts)",   timedelta(days=30)),
 }
 
+# 30s result cache — keyed by "api:<gran>" / "cmd:<gran>". The frontend
+# auto-refreshes every 30s, so repeated hits within the same window are served
+# from memory instead of re-running expensive queries.
+_stats_cache: dict[str, tuple[dict, datetime]] = {}
+_STATS_CACHE_TTL = 30.0
 
-async def get_api_stats(granularity: str = "1h") -> dict:
-    """API request counts per bucket and avg/p95 latency per endpoint."""
-    bucket_sql, window = _GRAN.get(granularity, _GRAN["1h"])
+
+def _stats_cached(key: str) -> dict | None:
+    entry = _stats_cache.get(key)
+    if entry and (datetime.now(timezone.utc) - entry[1]).total_seconds() < _STATS_CACHE_TTL:
+        return entry[0]
+    return None
+
+
+def _stats_store(key: str, value: dict) -> dict:
+    _stats_cache[key] = (value, datetime.now(timezone.utc))
+    return value
+
+
+async def _bucket_query(table: str, granularity: str) -> tuple[list[dict], str]:
+    """Returns (by_bucket_rows, since_iso) using the cheapest available strategy."""
+    if granularity in _GRAN_SUBSTR:
+        substr_len, window = _GRAN_SUBSTR[granularity]
+        since = (datetime.now(timezone.utc) - window).isoformat()
+        pool = await _get_pool()
+        async with pool.connection() as db:
+            cur = await db.execute(
+                f"""SELECT substr(created_at, 1, {substr_len}) AS bucket, COUNT(*)
+                    FROM {table} WHERE created_at >= %s
+                    GROUP BY bucket ORDER BY bucket""",
+                (since,),
+            )
+            # Pad to full ISO so JS new Date() parses unambiguously:
+            #   day  → "2024-01-15"          → append "T00:00:00Z"
+            #   1h   → "2024-01-15T14"       → append ":00:00Z"
+            suffix = "T00:00:00Z" if substr_len == 10 else ":00:00Z"
+            rows = [{"day": r[0] + suffix, "count": r[1]} for r in await cur.fetchall()]
+        return rows, since
+
+    bucket_sql, window = _GRAN_CAST[granularity]
     since = (datetime.now(timezone.utc) - window).isoformat()
     pool = await _get_pool()
     async with pool.connection() as db:
         cur = await db.execute(
             f"""WITH d AS (
                     SELECT CAST(created_at AS TIMESTAMPTZ) AS ts
-                    FROM api_request_log WHERE created_at >= %s
+                    FROM {table} WHERE created_at >= %s
                 )
                 SELECT {bucket_sql} AS bucket, COUNT(*)
                 FROM d GROUP BY bucket ORDER BY bucket""",
             (since,),
         )
-        by_day = [{"day": r[0].isoformat(), "count": r[1]} for r in await cur.fetchall()]
+        rows = [{"day": r[0].isoformat(), "count": r[1]} for r in await cur.fetchall()]
+    return rows, since
 
+
+async def get_api_stats(granularity: str = "1h") -> dict:
+    """API request counts per bucket and avg/p95 latency per endpoint."""
+    cache_key = f"api:{granularity}"
+    if (hit := _stats_cached(cache_key)) is not None:
+        return hit
+
+    by_day, since = await _bucket_query("api_request_log", granularity)
+    pool = await _get_pool()
+    async with pool.connection() as db:
         cur = await db.execute(
-            """SELECT method, path,
+            """SELECT method,
+                      regexp_replace(path, '/[0-9]{6,}', '/{id}', 'g') AS norm_path,
                       COUNT(*) AS total,
                       ROUND(AVG(duration_ms)) AS avg_ms,
                       PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY duration_ms) AS p95_ms
                FROM api_request_log
                WHERE created_at >= %s
-               GROUP BY method, path
+               GROUP BY method, norm_path
                ORDER BY total DESC""",
             (since,),
         )
@@ -496,26 +608,18 @@ async def get_api_stats(granularity: str = "1h") -> dict:
             for r in await cur.fetchall()
         ]
 
-    return {"by_day": by_day, "by_endpoint": by_endpoint}
+    return _stats_store(cache_key, {"by_day": by_day, "by_endpoint": by_endpoint})
 
 
 async def get_command_stats(granularity: str = "1h") -> dict:
-    """Chart data for the /admin/stats page: bucketed command counts and per-command latency."""
-    bucket_sql, window = _GRAN.get(granularity, _GRAN["1h"])
-    since = (datetime.now(timezone.utc) - window).isoformat()
+    """Bucketed Discord command counts and per-command latency."""
+    cache_key = f"cmd:{granularity}"
+    if (hit := _stats_cached(cache_key)) is not None:
+        return hit
+
+    by_day, since = await _bucket_query("bot_command_log", granularity)
     pool = await _get_pool()
     async with pool.connection() as db:
-        cur = await db.execute(
-            f"""WITH d AS (
-                    SELECT CAST(created_at AS TIMESTAMPTZ) AS ts
-                    FROM bot_command_log WHERE created_at >= %s
-                )
-                SELECT {bucket_sql} AS bucket, COUNT(*)
-                FROM d GROUP BY bucket ORDER BY bucket""",
-            (since,),
-        )
-        by_day = [{"day": r[0].isoformat(), "count": r[1]} for r in await cur.fetchall()]
-
         cur = await db.execute(
             """SELECT command,
                       COUNT(*) AS total,
@@ -539,7 +643,7 @@ async def get_command_stats(granularity: str = "1h") -> dict:
             for r in await cur.fetchall()
         ]
 
-    return {"by_day": by_day, "by_command": by_command}
+    return _stats_store(cache_key, {"by_day": by_day, "by_command": by_command})
 
 
 async def is_guild_banned(guild_id: str) -> bool:
