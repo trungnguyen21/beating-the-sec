@@ -462,6 +462,9 @@ async def flush_api_log_loop(interval: float = 5.0) -> None:
     """Background task started by the FastAPI lifespan. Drains the buffer into
     Postgres every `interval` seconds in a single batched executemany.
     Also prunes rows older than 7 days every ~5 minutes to keep the table bounded."""
+    import logging
+    _flog = logging.getLogger("db.flush_api_log")
+    _flog.info("flush_api_log_loop started")
     prune_counter = 0
     while True:
         await asyncio.sleep(interval)
@@ -472,14 +475,17 @@ async def flush_api_log_loop(interval: float = 5.0) -> None:
             try:
                 pool = await _get_pool()
                 async with pool.connection() as db:
-                    await db.executemany(
-                        """INSERT INTO api_request_log
-                           (id, method, path, status_code, duration_ms, created_at)
-                           VALUES (%s, %s, %s, %s, %s, %s)""",
-                        rows,
-                    )
+                    async with db.cursor() as cur:
+                        await cur.executemany(
+                            """INSERT INTO api_request_log
+                               (id, method, path, status_code, duration_ms, created_at)
+                               VALUES (%s, %s, %s, %s, %s, %s)""",
+                            rows,
+                        )
                     await db.commit()
-            except Exception:
+                _flog.debug("flushed %d api log rows", len(rows))
+            except Exception as exc:
+                _flog.error("flush failed (%s), %d rows returned to buffer", exc, len(rows))
                 _api_log_buffer.extendleft(reversed(rows))
 
         prune_counter += 1
@@ -493,8 +499,8 @@ async def flush_api_log_loop(interval: float = 5.0) -> None:
                         "DELETE FROM api_request_log WHERE created_at < %s", (cutoff,)
                     )
                     await db.commit()
-            except Exception:
-                pass
+            except Exception as exc:
+                _flog.error("prune failed: %s", exc)
 
 
 # Granularities that can use simple substr() on the TEXT created_at column —

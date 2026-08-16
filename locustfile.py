@@ -1,10 +1,10 @@
 """
 BSEC endurance load test — public API endpoints.
 
-Simulates ~1,000 concurrent users in a repeating wave pattern (no time limit).
-Stop manually with Ctrl-C or the web UI stop button.
+Simulates up to --peak-users concurrent users in an unpredictable chaotic
+pattern (no time limit). Stop manually with Ctrl-C or the web UI stop button.
 
-Traffic math (at 1k users, wait_time avg 20s):
+Traffic math (at 1k peak users, wait_time avg 20s):
   Total:                     ~50 req/s  (~3,000 req/min)
   GET /api/calendar 24h:     ~13 req/s  (  ~810 req/min)  27%
   GET /api/calendar extended:  ~5 req/s  (  ~270 req/min)   9%
@@ -12,20 +12,10 @@ Traffic math (at 1k users, wait_time avg 20s):
   POST .../watch/add:          ~9 req/s  (  ~540 req/min)  18%
   POST .../watch/remove:       ~9 req/s  (  ~540 req/min)  18%
 
-At trough (300 users):       ~15 req/s  (  ~900 req/min)
-
-Jitter: ±10% of the current target, applied via two overlapping sine waves
-at different periods (137s and 89s). They drift in and out of phase so the
-load looks organic rather than perfectly flat during holds.
-
-Wave cycle (60 min, repeating):
-  0–5 min   ramp  100 → peak   (default 1,000)
-  5–20 min  hold  peak  + jitter
-  20–25 min drop  peak → trough (default 300)
-  25–40 min hold  trough + jitter
-  40–45 min ramp  trough → peak
-  45–60 min hold  peak  + jitter
-  → repeat
+Shape: weighted Markov chain over 4 states (dead / low / normal / spike).
+Each state picks a random duration; the next state is chosen by probability
+so the pattern is never the same run to run. Ramps use a smooth ease-in-out
+curve. Dead zones can hit near-zero; spikes reach --peak-users.
 
 Run:
     locust -f locustfile.py --host http://localhost:8000
@@ -37,9 +27,9 @@ Custom params (also available in web UI → Advanced options):
     --guild-ids 123,456    real guild IDs (blank = synthetic, 409s expected)
     --read-only            skip write endpoints
     --calendar-max-hours   upper bound for ?hours= (default 168)
-    --peak-users           peak user count per wave (default 1000)
-    --trough-users         trough user count per wave (default 300)
-    --jitter-pct           jitter amplitude as fraction of target (default 0.10)
+    --peak-users           ceiling for spike state (default 1000)
+    --trough-users         unused by chaotic shape (kept for compatibility)
+    --jitter-pct           unused by chaotic shape (kept for compatibility)
 """
 
 import math
@@ -163,77 +153,113 @@ class PublicAPIUser(HttpUser):
                 resp.failure(f"Unexpected {resp.status_code}: {resp.text[:120]}")
 
 
-# ── Wave shape (repeating, no end) ────────────────────────────────────────────
+# ── Chaotic state-machine shape ───────────────────────────────────────────────
+#
+# Instead of a fixed repeating wave, this uses a weighted Markov chain over
+# four states. Each state picks a random duration and the next state is chosen
+# probabilistically, so the pattern never repeats the same way twice.
+#
+# States (user counts and durations scale with --peak-users / --trough-users):
+#   dead   — near-zero traffic, simulates a quiet period / overnight lull
+#   low    — light traffic, below the trough floor
+#   normal — sustained mid-level load
+#   spike  — burst up to peak, short-lived
+#
+# Transition weights (read as: from state X, go to Y with relative weight W):
+#   dead   → low(6)  normal(3)  spike(1)
+#   low    → dead(2) normal(5)  spike(2)  low(1)
+#   normal → low(3)  dead(1)    spike(3)  normal(3)
+#   spike  → normal(5) low(3)   dead(2)
+#
+# Ramps between states use a smooth ease-in-out curve so lines in the graph
+# look organic rather than perfectly linear.
 
-def _jitter(t: int, base: int, pct: float) -> int:
+_STATE_CFG = {
+    #          lo_frac  hi_frac  min_s  max_s
+    "dead":   (0.00,    0.05,    60,    300),
+    "low":    (0.10,    0.35,    120,   600),
+    "normal": (0.35,    0.75,    180,   900),
+    "spike":  (0.80,    1.00,    60,    240),
+}
+
+_TRANSITIONS = {
+    "dead":   [("low", 6),   ("normal", 3), ("spike", 1)],
+    "low":    [("dead", 2),  ("normal", 5), ("spike", 2), ("low", 1)],
+    "normal": [("low", 3),   ("dead", 1),   ("spike", 3), ("normal", 3)],
+    "spike":  [("normal", 5),("low", 3),    ("dead", 2)],
+}
+
+_RAMP_S = 45  # seconds for smooth transition between states
+
+
+def _ease(x: float) -> float:
+    """Smooth-step: ease-in-out curve, input 0–1 → output 0–1."""
+    return x * x * (3 - 2 * x)
+
+
+def _state_users(state: str, peak: int) -> int:
+    lo_f, hi_f, _, _ = _STATE_CFG[state]
+    return random.randint(int(peak * lo_f), max(1, int(peak * hi_f)))
+
+
+def _state_duration(state: str) -> int:
+    _, _, dmin, dmax = _STATE_CFG[state]
+    return random.randint(dmin, dmax)
+
+
+def _next_state(current: str) -> str:
+    opts = _TRANSITIONS[current]
+    return random.choices([s for s, _ in opts], weights=[w for _, w in opts])[0]
+
+
+class ChaoticShape(LoadTestShape):
     """
-    Smooth organic jitter via two sine waves with prime-ish periods (137s, 89s).
-    They drift in/out of phase so holds never look perfectly flat.
-    Only applied during hold phases — ramps stay clean.
-    """
-    amplitude = int(base * pct)
-    wave = (
-        0.6 * math.sin(t * 2 * math.pi / 137) +
-        0.4 * math.sin(t * 2 * math.pi / 89)
-    )
-    return int(amplitude * wave)
+    Unpredictable state-machine shape — random spikes, dead zones, and
+    sustained loads with no fixed cycle. Runs indefinitely.
 
-
-class WaveShape(LoadTestShape):
-    """
-    Repeating 60-minute wave with two peaks per cycle and organic jitter on
-    hold phases. Runs indefinitely — stop via web UI or Ctrl-C.
-
-    Peak/trough/jitter come from --peak-users / --trough-users / --jitter-pct.
-
-    Cycle layout (seconds):
-        0   – 300   ramp  100 → peak
-        300 – 1200  hold  peak   ± jitter   (15 min)
-        1200– 1500  ramp  peak → trough
-        1500– 2400  hold  trough ± jitter   (15 min)
-        2400– 2700  ramp  trough → peak
-        2700– 3600  hold  peak   ± jitter   (15 min)
-        → repeat from 0
+    --peak-users   ceiling for spike state  (default 1000)
+    --trough-users unused (shape derives floors from peak fractions)
     """
 
-    _CYCLE = 3600
+    def __init__(self):
+        super().__init__()
+        self._cur_state: str = "low"
+        self._cur_users: int = 0
+        self._state_end: float = 0.0
+        self._ramp_start: float | None = None
+        self._ramp_from: int = 0
+        self._ramp_to: int = 0
+        self._next_st: str = "low"
+        self._ready: bool = False
 
     def tick(self):
         opts = self.runner.environment.parsed_options
-        peak       = opts.peak_users   if opts else 1000
-        trough     = opts.trough_users if opts else 300
-        jitter_pct = opts.jitter_pct   if opts else 0.10
+        peak = opts.peak_users if opts else 1000
+        t = self.get_run_time()
 
-        t = int(self.get_run_time()) % self._CYCLE
+        if not self._ready:
+            self._ready = True
+            self._cur_users = _state_users(self._cur_state, peak)
+            self._state_end = t + _state_duration(self._cur_state)
 
-        if t < 300:
-            # Ramp up: 100 → peak (clean, no jitter)
-            users = int(100 + (peak - 100) * t / 300)
-            return users, 50
+        # Mid-ramp
+        if self._ramp_start is not None:
+            elapsed = t - self._ramp_start
+            if elapsed >= _RAMP_S:
+                self._cur_state = self._next_st
+                self._cur_users = self._ramp_to
+                self._state_end = t + _state_duration(self._cur_state)
+                self._ramp_start = None
+            else:
+                progress = _ease(elapsed / _RAMP_S)
+                users = int(self._ramp_from + (self._ramp_to - self._ramp_from) * progress)
+                return max(1, users), 50
 
-        elif t < 1200:
-            # Hold peak + jitter
-            users = max(1, peak + _jitter(t, peak, jitter_pct))
-            return users, 50
+        # State expired — pick next
+        if t >= self._state_end:
+            self._next_st = _next_state(self._cur_state)
+            self._ramp_from = self._cur_users
+            self._ramp_to = _state_users(self._next_st, peak)
+            self._ramp_start = t
 
-        elif t < 1500:
-            # Ramp down: peak → trough (clean)
-            progress = (t - 1200) / 300
-            users = int(peak - (peak - trough) * progress)
-            return users, 50
-
-        elif t < 2400:
-            # Hold trough + jitter
-            users = max(1, trough + _jitter(t, trough, jitter_pct))
-            return users, 50
-
-        elif t < 2700:
-            # Ramp up: trough → peak (clean)
-            progress = (t - 2400) / 300
-            users = int(trough + (peak - trough) * progress)
-            return users, 50
-
-        else:
-            # Hold second peak + jitter
-            users = max(1, peak + _jitter(t, peak, jitter_pct))
-            return users, 50
+        return max(1, self._cur_users), 50
