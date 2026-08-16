@@ -13,6 +13,7 @@ from typing import Annotated
 from config import ADMIN_PASSWORD, ADMIN_USERNAME
 from server.db import (
     GuildNotSetUpError,
+    flush_api_log_loop,
     get_all_tickers,
     get_api_stats,
     get_bot_stats,
@@ -34,7 +35,17 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-app = FastAPI(title="BSEC Alerts")
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    task = asyncio.create_task(flush_api_log_loop())
+    yield
+    task.cancel()
+
+
+app = FastAPI(title="BSEC Alerts", lifespan=_lifespan)
 templates = Jinja2Templates(directory=str(Path(__file__).parent / "templates"))
 
 
@@ -44,9 +55,8 @@ async def _log_api_timing(request: Request, call_next):
     response = await call_next(request)
     duration_ms = int((time.perf_counter() - start) * 1000)
     if request.url.path.startswith("/api/"):
-        asyncio.create_task(
-            log_api_request(request.method, request.url.path, response.status_code, duration_ms)
-        )
+        # Synchronous append to in-memory buffer — no DB call, no await
+        log_api_request(request.method, request.url.path, response.status_code, duration_ms)
     return response
 
 security = HTTPBasic()

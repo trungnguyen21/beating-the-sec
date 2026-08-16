@@ -98,6 +98,12 @@ ALTER TABLE earnings_calendar ADD COLUMN IF NOT EXISTS earnings_time TEXT;
 ALTER TABLE tickers ADD COLUMN IF NOT EXISTS is_active INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE bot_command_log ADD COLUMN IF NOT EXISTS duration_ms INTEGER;
 
+-- Functional indexes so date_trunc queries can index-scan instead of seq-scan + cast.
+CREATE INDEX IF NOT EXISTS idx_api_request_log_ts
+    ON api_request_log ((CAST(created_at AS TIMESTAMPTZ)));
+CREATE INDEX IF NOT EXISTS idx_bot_command_log_ts
+    ON bot_command_log ((CAST(created_at AS TIMESTAMPTZ)));
+
 CREATE TABLE IF NOT EXISTS api_request_log (
     id          TEXT PRIMARY KEY,
     method      TEXT NOT NULL,
