@@ -2,6 +2,8 @@
 
 Low-latency SEC 8-K earnings filing analyzer. Detects new filings as fast as possible, runs parallel AI analysis, and fans out structured alerts to subscribers via Discord.
 
+![Filing alert pipeline demo](filing_alert_pipeline.gif)
+
 ---
 
 ## What it does
